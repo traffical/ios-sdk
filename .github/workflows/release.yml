@@ -7,6 +7,14 @@ on:
 permissions:
   contents: write
 
+# Only one release run at a time per branch. If a second push arrives while
+# a release is in flight, the queued run is canceled rather than racing the
+# first to push tags. (Concurrent runs were observed on the v0.2.0 cut:
+# both tried to bump + push, the slower one hit "failed to push some refs".)
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-14
