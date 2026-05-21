@@ -271,22 +271,25 @@ public enum TrafficalBundleDecoder {
 }
 
 // MARK: - Numeric coercion
+//
+// `public` so wire-level decoders in the `Traffical` target (DecisionClient,
+// ServerResponseCache) can share the same conversion logic without duplication.
 
-func numericInt(_ value: Any?) -> Int? {
+public func numericInt(_ value: Any?) -> Int? {
     if let n = value as? Int { return n }
     if let n = value as? NSNumber { return n.intValue }
     if let s = value as? String { return Int(s) }
     return nil
 }
 
-func numericDouble(_ value: Any?) -> Double? {
+public func numericDouble(_ value: Any?) -> Double? {
     if let n = value as? Double { return n }
     if let n = value as? NSNumber { return n.doubleValue }
     if let s = value as? String { return Double(s) }
     return nil
 }
 
-func inferType(of value: Any) -> String {
+public func inferType(of value: Any) -> String {
     if let n = value as? NSNumber {
         if CFGetTypeID(n) == CFBooleanGetTypeID() { return "boolean" }
         return "number"
