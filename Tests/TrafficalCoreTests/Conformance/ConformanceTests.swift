@@ -16,9 +16,12 @@ final class ConformanceTests: XCTestCase {
         try runFixture(name: "conditions")
     }
 
-    // Per-fixture suites for `bundle_contextual`, `entity_weights`,
-    // `bundle_edge_policies`, and `expected_resolve` are wired up in
-    // Stages 2 and 4 once the corresponding engine pieces land.
+    func test_bundle_contextual() throws {
+        try runFixture(name: "contextual")
+    }
+
+    // `bundle_edge_policies` + `expected_resolve` land alongside Stage 4 once
+    // server-mode and edge-policy plumbing is wired into the engine harness.
 
     // MARK: - Runner
 
