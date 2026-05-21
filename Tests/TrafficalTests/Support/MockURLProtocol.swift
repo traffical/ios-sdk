@@ -33,13 +33,29 @@ final class MockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        MockURLProtocol.requests.append(request)
+        // URLSession often streams the POST body, leaving `httpBody` nil.
+        // Materialize the stream so test handlers can inspect the payload.
+        var captured = request
+        if captured.httpBody == nil, let stream = captured.httpBodyStream {
+            stream.open()
+            var data = Data()
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+            defer { buffer.deallocate() }
+            while stream.hasBytesAvailable {
+                let n = stream.read(buffer, maxLength: 4096)
+                if n <= 0 { break }
+                data.append(buffer, count: n)
+            }
+            stream.close()
+            captured.httpBody = data
+        }
+        MockURLProtocol.requests.append(captured)
         guard let handler = MockURLProtocol.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
         do {
-            let response = try handler(request)
+            let response = try handler(captured)
             let url = request.url ?? URL(string: "https://example.invalid")!
             let urlResponse = HTTPURLResponse(
                 url: url,

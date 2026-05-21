@@ -1,0 +1,61 @@
+import Foundation
+import TrafficalCore
+
+/// Warehouse-native assignment log entry consumer.
+///
+/// When the host app wants to route assignments to its own analytics
+/// pipeline (Segment, Rudderstack, direct DB write), they pass a closure
+/// matching this signature in `TrafficalClient.Options`.
+public typealias TrafficalAssignmentLogger = (TrafficalAssignmentLogEntry) -> Void
+
+/// Emits assignment log entries from a decision, with per-session
+/// deduplication so the same unit/policy/allocation doesn't fire repeatedly.
+public final class AssignmentLogEmitter: @unchecked Sendable {
+    private let orgId: String
+    private let projectId: String
+    private let env: String
+    private let logger: TrafficalAssignmentLogger
+    private let dedup: ExposureDeduplicator?
+
+    public init(
+        orgId: String,
+        projectId: String,
+        env: String,
+        deduplicate: Bool = true,
+        logger: @escaping TrafficalAssignmentLogger
+    ) {
+        self.orgId = orgId
+        self.projectId = projectId
+        self.env = env
+        self.logger = logger
+        self.dedup = deduplicate ? ExposureDeduplicator() : nil
+    }
+
+    public func emit(decision: TrafficalDecisionResult) {
+        let unitKey = decision.metadata.unitKeyValue
+        guard !unitKey.isEmpty else { return }
+        for layer in decision.metadata.layers {
+            guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
+            if let dedup = dedup, !dedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
+                continue
+            }
+            let entry = TrafficalAssignmentLogEntry(
+                unitKey: unitKey,
+                policyId: policyId,
+                policyKey: layer.policyKey,
+                allocationName: allocationName,
+                allocationKey: layer.allocationKey,
+                timestamp: decision.metadata.timestamp,
+                layerId: layer.layerId,
+                allocationId: layer.allocationId,
+                orgId: orgId,
+                projectId: projectId,
+                env: env,
+                sdkName: SDK_NAME,
+                sdkVersion: SDK_VERSION,
+                properties: decision.metadata.filteredContext
+            )
+            logger(entry)
+        }
+    }
+}
