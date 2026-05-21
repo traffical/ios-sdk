@@ -6,7 +6,7 @@ import TrafficalCore
 /// When the host app wants to route assignments to its own analytics
 /// pipeline (Segment, Rudderstack, direct DB write), they pass a closure
 /// matching this signature in `TrafficalClient.Options`.
-public typealias TrafficalAssignmentLogger = (TrafficalAssignmentLogEntry) -> Void
+public typealias TrafficalAssignmentLogger = @Sendable (TrafficalAssignmentLogEntry) -> Void
 
 /// Emits assignment log entries from a decision, with per-session
 /// deduplication so the same unit/policy/allocation doesn't fire repeatedly.

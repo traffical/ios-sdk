@@ -21,6 +21,11 @@ public enum TrafficalParameterValue: Sendable, Equatable {
         case .json: return "json"
         }
     }
+
+    public var stringValue: String? { if case .string(let s) = self { return s } else { return nil } }
+    public var numberValue: Double? { if case .number(let n) = self { return n } else { return nil } }
+    public var boolValue: Bool? { if case .bool(let b) = self { return b } else { return nil } }
+    public var jsonValue: TrafficalJSON? { if case .json(let j) = self { return j } else { return nil } }
 }
 
 /// A JSON value carried inside parameter values, context, condition operands,
