@@ -32,7 +32,7 @@ jobs:
         id: bump
         run: |
           bash scripts/bump-version.sh
-          version=$(grep 'SDK_VERSION' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
+          version=$(grep 'trafficalSDKVersion' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag

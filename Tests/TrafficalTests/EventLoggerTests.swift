@@ -113,8 +113,8 @@ final class EventLoggerTests: XCTestCase {
                 env: "prod",
                 unitKey: "user",
                 timestamp: TrafficalTime.now(),
-                sdkName: SDK_NAME,
-                sdkVersion: SDK_VERSION
+                sdkName: trafficalSDKName,
+                sdkVersion: trafficalSDKVersion
             ),
             event: name
         )

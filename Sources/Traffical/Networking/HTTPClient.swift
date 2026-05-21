@@ -47,8 +47,8 @@ public final class TrafficalHTTPClient: @unchecked Sendable {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(SDK_NAME, forHTTPHeaderField: "X-SDK-Name")
-        request.setValue(SDK_VERSION, forHTTPHeaderField: "X-SDK-Version")
+        request.setValue(trafficalSDKName, forHTTPHeaderField: "X-SDK-Name")
+        request.setValue(trafficalSDKVersion, forHTTPHeaderField: "X-SDK-Version")
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         if let body = body { request.httpBody = body }
 

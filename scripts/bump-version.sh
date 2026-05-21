@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-current=$(grep 'SDK_VERSION' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
+current=$(grep 'trafficalSDKVersion' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
 
 bump="patch"
 notes=""
@@ -36,7 +36,7 @@ case "$bump" in
 esac
 next="${maj}.${min}.${pat}"
 
-sed -i.bak -E "s/SDK_VERSION = \"[^\"]+\"/SDK_VERSION = \"${next}\"/" Sources/Traffical/Client/Version.swift
+sed -i.bak -E "s/trafficalSDKVersion = \"[^\"]+\"/trafficalSDKVersion = \"${next}\"/" Sources/Traffical/Client/Version.swift
 rm Sources/Traffical/Client/Version.swift.bak
 
 today=$(date -u +%Y-%m-%d)

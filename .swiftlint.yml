@@ -7,6 +7,14 @@ disabled_rules:
   - file_length
   - cyclomatic_complexity
   - large_tuple
+  # Else / catch on their own line is common in this codebase, e.g.
+  #   do { try work() }
+  #   catch { handler(error) }
+  - statement_position
+  # We use shorthand identifiers liberally for closure params, dictionary
+  # iteration, etc. Reinstating the default 3-char minimum would just force
+  # noise like `key`/`value` everywhere with no real readability gain.
+  - identifier_name
 
 opt_in_rules:
   - empty_count

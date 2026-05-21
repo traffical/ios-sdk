@@ -420,8 +420,8 @@ public final class TrafficalClient: @unchecked Sendable {
             unitKey: unitKey,
             timestamp: TrafficalTime.now(),
             context: context,
-            sdkName: SDK_NAME,
-            sdkVersion: SDK_VERSION
+            sdkName: trafficalSDKName,
+            sdkVersion: trafficalSDKVersion
         )
     }
 

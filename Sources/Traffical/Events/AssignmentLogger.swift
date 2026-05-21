@@ -51,8 +51,8 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
                 orgId: orgId,
                 projectId: projectId,
                 env: env,
-                sdkName: SDK_NAME,
-                sdkVersion: SDK_VERSION,
+                sdkName: trafficalSDKName,
+                sdkVersion: trafficalSDKVersion,
                 properties: decision.metadata.filteredContext
             )
             logger(entry)

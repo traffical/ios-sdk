@@ -21,7 +21,7 @@ final class HTTPClientTests: XCTestCase {
         let request = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer pk_test_123")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-SDK-Name"), "ios")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SDK-Version"), SDK_VERSION)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-SDK-Version"), trafficalSDKVersion)
     }
 
     func test_post_sends_body() async throws {
