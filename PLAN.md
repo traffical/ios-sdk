@@ -117,12 +117,20 @@ CI runs all of the above on every PR on macOS + iOS Simulator + Linux (Core only
 
 | Stage | Status | Notes |
 |---|---|---|
-| 0 | in-progress | — |
-| 1 | pending | — |
-| 2 | pending | — |
-| 3 | pending | — |
-| 4 | pending | — |
-| 5 | pending | — |
-| 6 | pending | — |
-| 7 | pending | — |
-| 8 | pending | — |
+| 0 | done | repo, Package.swift, CI, lint, changesets, submodule, PrivacyInfo |
+| 1 | done | core engine + types + FNV-1a + bucket + conditions; bundle_basic + bundle_conditions conformance green |
+| 2 | done | contextual scoring + per-entity bundle resolution; bundle_contextual conformance green |
+| 3 | done | URLSession HTTPClient, ConfigFetcher with ETag, BundleCache, KeychainStore, StableIDProvider, DefaultsStore |
+| 4 | done | DecisionClient (resolve + entity batch), ServerResponseCache, expected_edge_policies + expected_resolve conformance green |
+| 5 | done | EventLogger batching/retry, LifecycleProvider, AssignmentLogger, AttributionMap |
+| 6 | done | public TrafficalClient API: typed getters, decide, track, identify, overrides, DeviceInfo, ErrorBoundary |
+| 7 | done | SwiftUI sample app at Examples/TrafficalSampleApp with re-roll button |
+| 8 | done | v0.1.0 release: SDK_VERSION bumped, CHANGELOG written, 90 tests green |
+
+## Verification snapshot at v0.1.0
+
+- `swift build`: clean.
+- `swift test`: 90 tests passing across 16 suites.
+- Conformance: every fixture under `sdk-spec/test-vectors/fixtures/` is green.
+- Sample app: builds via SPM; `xcodebuild` requires an installed iOS
+  Simulator runtime which depends on the local Xcode install.

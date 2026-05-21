@@ -2,6 +2,5 @@
 "Traffical": minor
 ---
 
-Initial release scaffolding: `TrafficalCore` resolution engine (types, FNV-1a,
-bucket, conditions, engine) with cross-SDK conformance against `sdk-spec` test
-vectors. Repo, CI, lint, and changesets glue in place.
+Initial release scaffolding consumed at v0.1.0. (This file is left in place
+so the next changeset run can demonstrate the bump flow against a real diff.)
