@@ -68,6 +68,7 @@ public enum TrafficalBundleDecoder {
     static func decodeLayer(_ dict: [String: Any]) throws -> BundleLayer {
         return BundleLayer(
             id: try string(dict, "id"),
+            unitKey: dict["unitKey"] as? String,
             policies: try arrayOfObjects(dict, "policies").map(decodePolicy)
         )
     }

@@ -69,10 +69,15 @@ public struct BundleParameter: Sendable, Equatable {
 
 public struct BundleLayer: Sendable, Equatable {
     public var id: String
+    /// Optional per-layer unit key override for multi-entity randomization.
+    /// When set, the SDK hashes on this context field instead of
+    /// `hashing.unitKey` for this layer only.
+    public var unitKey: String?
     public var policies: [BundlePolicy]
 
-    public init(id: String, policies: [BundlePolicy]) {
+    public init(id: String, unitKey: String? = nil, policies: [BundlePolicy]) {
         self.id = id
+        self.unitKey = unitKey
         self.policies = policies
     }
 }

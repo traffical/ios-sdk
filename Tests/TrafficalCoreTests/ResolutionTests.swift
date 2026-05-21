@@ -20,10 +20,13 @@ final class ResolutionTests: XCTestCase {
         XCTAssertEqual(result["x"], .string("default"))
     }
 
-    func test_returns_defaults_when_no_unit_key() {
-        let bundle = makeBundle(layers: [], parameters: [])
-        let result = resolveParameters(bundle: bundle, context: [:], defaults: ["x": .string("default")])
-        XCTAssertEqual(result["x"], .string("default"))
+    func test_returns_bundle_defaults_when_no_unit_key() {
+        let bundle = makeBundle(
+            layers: [BundleLayer(id: "L", policies: [])],
+            parameters: [BundleParameter(key: "x", type: "string", default: .string("bundle_d"), layerId: "L", namespace: "")]
+        )
+        let result = resolveParameters(bundle: bundle, context: [:], defaults: ["x": .string("caller_d")])
+        XCTAssertEqual(result["x"], .string("bundle_d"))
     }
 
     func test_returns_bundle_defaults_when_no_policy_matches() {
@@ -204,5 +207,159 @@ final class ResolutionTests: XCTestCase {
         XCTAssertFalse(decision.decisionId.isEmpty)
         XCTAssertFalse(decision.metadata.timestamp.isEmpty)
         XCTAssertEqual(decision.metadata.unitKeyValue, "u")
+    }
+
+    // MARK: - Per-layer unit key (multi-entity randomization)
+
+    private func makeMixedUnitBundle() -> TrafficalConfigBundle {
+        TrafficalConfigBundle(
+            version: "2026-05-21T00:00:00Z",
+            orgId: "org_test",
+            projectId: "proj_test",
+            env: "production",
+            hashing: BundleHashingConfig(unitKey: "userId", bucketCount: 1000),
+            parameters: [
+                BundleParameter(key: "ui.theme", type: "string", default: .string("light"),
+                                layerId: "layer_user_ui", namespace: "ui"),
+                BundleParameter(key: "pricing.merchantDiscount", type: "number", default: .number(0),
+                                layerId: "layer_merchant_pricing", namespace: "pricing"),
+            ],
+            layers: [
+                BundleLayer(id: "layer_user_ui", policies: [
+                    BundlePolicy(id: "policy_ui_theme", state: .running, kind: .static,
+                                 allocations: [
+                                    BundleAllocation(id: "a_ctrl", name: "control",
+                                                     bucketRange: BundleBucketRange(start: 0, end: 499),
+                                                     overrides: ["ui.theme": .string("light")]),
+                                    BundleAllocation(id: "a_dark", name: "dark_mode",
+                                                     bucketRange: BundleBucketRange(start: 500, end: 999),
+                                                     overrides: ["ui.theme": .string("dark")]),
+                                 ],
+                                 conditions: []),
+                ]),
+                BundleLayer(id: "layer_merchant_pricing", unitKey: "merchantId", policies: [
+                    BundlePolicy(id: "policy_merchant_discount", state: .running, kind: .static,
+                                 allocations: [
+                                    BundleAllocation(id: "a_no", name: "no_discount",
+                                                     bucketRange: BundleBucketRange(start: 0, end: 499),
+                                                     overrides: ["pricing.merchantDiscount": .number(0)]),
+                                    BundleAllocation(id: "a_15", name: "discount_15",
+                                                     bucketRange: BundleBucketRange(start: 500, end: 999),
+                                                     overrides: ["pricing.merchantDiscount": .number(15)]),
+                                 ],
+                                 conditions: []),
+                ]),
+            ]
+        )
+    }
+
+    func test_per_layer_unit_key_both_present() {
+        let bundle = makeMixedUnitBundle()
+        let decision = decide(
+            bundle: bundle,
+            context: ["userId": .string("user-abc"), "merchantId": .string("merchant-1")],
+            defaults: ["ui.theme": .string("light"), "pricing.merchantDiscount": .number(0)]
+        )
+
+        // layer_user_ui: hashes on userId (project default) → bucket 73 → control
+        let uiLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_user_ui" })
+        XCTAssertNotNil(uiLayer)
+        XCTAssertEqual(uiLayer?.bucket, 73)
+        XCTAssertNil(uiLayer?.unitKey)
+        XCTAssertNil(uiLayer?.unitKeyValue)
+
+        // layer_merchant_pricing: hashes on merchantId → bucket 628 → discount_15
+        let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
+        XCTAssertNotNil(pricingLayer)
+        XCTAssertEqual(pricingLayer?.bucket, 628)
+        XCTAssertEqual(pricingLayer?.unitKey, "merchantId")
+        XCTAssertEqual(pricingLayer?.unitKeyValue, "merchant-1")
+        XCTAssertEqual(pricingLayer?.allocationName, "discount_15")
+
+        XCTAssertEqual(decision.assignments["pricing.merchantDiscount"], .number(15))
+    }
+
+    func test_per_layer_unit_key_merchant_missing() {
+        let bundle = makeMixedUnitBundle()
+        let decision = decide(
+            bundle: bundle,
+            context: ["userId": .string("user-abc")],
+            defaults: ["ui.theme": .string("light"), "pricing.merchantDiscount": .number(0)]
+        )
+
+        // user layer still resolves
+        let uiLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_user_ui" })
+        XCTAssertNotNil(uiLayer)
+        XCTAssertEqual(uiLayer?.bucket, 73)
+
+        // merchant layer is skipped
+        let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
+        XCTAssertNotNil(pricingLayer)
+        XCTAssertEqual(pricingLayer?.bucket, -1)
+        XCTAssertEqual(pricingLayer?.unitKey, "merchantId")
+        XCTAssertEqual(pricingLayer?.unitKeyValue, "")
+
+        // Bundle default returned for the skipped layer
+        XCTAssertEqual(decision.assignments["pricing.merchantDiscount"], .number(0))
+    }
+
+    func test_per_layer_unit_key_project_key_missing() {
+        let bundle = makeMixedUnitBundle()
+        let decision = decide(
+            bundle: bundle,
+            context: ["merchantId": .string("merchant-1")],
+            defaults: ["ui.theme": .string("light"), "pricing.merchantDiscount": .number(0)]
+        )
+
+        // user layer skipped — project unitKey (userId) not in context
+        let uiLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_user_ui" })
+        XCTAssertNotNil(uiLayer)
+        XCTAssertEqual(uiLayer?.bucket, -1)
+
+        // merchant layer resolves independently
+        let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
+        XCTAssertNotNil(pricingLayer)
+        XCTAssertEqual(pricingLayer?.bucket, 628)
+        XCTAssertEqual(pricingLayer?.allocationName, "discount_15")
+        XCTAssertEqual(decision.assignments["pricing.merchantDiscount"], .number(15))
+
+        // ui.theme should be the bundle default since layer was skipped
+        XCTAssertEqual(decision.assignments["ui.theme"], .string("light"))
+    }
+
+    func test_per_layer_unit_key_both_missing() {
+        let bundle = makeMixedUnitBundle()
+        let decision = decide(
+            bundle: bundle,
+            context: [:],
+            defaults: ["ui.theme": .string("light"), "pricing.merchantDiscount": .number(0)]
+        )
+
+        // Both layers skipped
+        for layer in decision.metadata.layers {
+            XCTAssertEqual(layer.bucket, -1)
+        }
+
+        // Bundle defaults returned
+        XCTAssertEqual(decision.assignments["ui.theme"], .string("light"))
+        XCTAssertEqual(decision.assignments["pricing.merchantDiscount"], .number(0))
+    }
+
+    func test_bundle_decoding_reads_layer_unit_key() throws {
+        let json: [String: Any] = [
+            "version": "2024-01-01T00:00:00.000Z",
+            "orgId": "org_test",
+            "projectId": "proj_test",
+            "env": "production",
+            "hashing": ["unitKey": "userId", "bucketCount": 1000],
+            "parameters": [],
+            "layers": [
+                ["id": "L1", "policies": []],
+                ["id": "L2", "unitKey": "merchantId", "policies": []],
+            ]
+        ]
+        let bundle = try TrafficalBundleDecoder.decode(json)
+        XCTAssertNil(bundle.layers[0].unitKey)
+        XCTAssertEqual(bundle.layers[1].unitKey, "merchantId")
     }
 }

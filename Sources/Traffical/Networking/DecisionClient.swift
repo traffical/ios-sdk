@@ -190,6 +190,8 @@ func decodeLayerResolution(_ dict: [String: Any]) -> TrafficalLayerResolution {
         allocationId: dict["allocationId"] as? String,
         allocationName: dict["allocationName"] as? String,
         allocationKey: dict["allocationKey"] as? String,
+        unitKey: dict["unitKey"] as? String,
+        unitKeyValue: dict["unitKeyValue"] as? String,
         attributionOnly: (dict["attributionOnly"] as? Bool) ?? false
     )
 }

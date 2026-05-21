@@ -83,6 +83,8 @@ private func layerToAny(_ layer: TrafficalLayerResolution) -> [String: Any] {
     if let allocationId = layer.allocationId { out["allocationId"] = allocationId }
     if let allocationName = layer.allocationName { out["allocationName"] = allocationName }
     if let allocationKey = layer.allocationKey { out["allocationKey"] = allocationKey }
+    if let unitKey = layer.unitKey { out["unitKey"] = unitKey }
+    if let unitKeyValue = layer.unitKeyValue { out["unitKeyValue"] = unitKeyValue }
     return out
 }
 
