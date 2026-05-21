@@ -18,8 +18,11 @@ for f in .changeset/*.md; do
     esac
     [ -f "$f" ] || continue
 
-    header=$(sed -n '2,/^---$/p' "$f" | head -n -1)
-    body=$(awk '/^---$/{c++;next}c==2' "$f")
+    # Frontmatter is between the first two `---` lines; body is after the
+    # second `---`. Use awk for both — BSD `head` (macOS runner) does not
+    # support the GNU `head -n -1` "all but last line" syntax.
+    header=$(awk '/^---$/{c++; next} c==1' "$f")
+    body=$(awk '/^---$/{c++; next} c==2' "$f")
 
     case "$header" in
         *major*) bump="major";;
