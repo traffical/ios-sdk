@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: oven-sh/setup-bun@v1
+
+      - name: Install changesets CLI
+        run: bun add -d @changesets/cli
+
+      - name: Detect pending changesets
+        id: detect
+        run: |
+          count=$(ls .changeset/*.md 2>/dev/null | grep -vE '(README|config)' | wc -l | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version and changelog
+        if: steps.detect.outputs.count != '0'
+        id: bump
+        run: |
+          bash scripts/bump-version.sh
+          version=$(grep 'SDK_VERSION' Sources/Traffical/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        if: steps.detect.outputs.count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Sources/Traffical/Version.swift CHANGELOG.md .changeset/
+          git commit -m "release: v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin main --tags
+
+      - name: Create GitHub release
+        if: steps.detect.outputs.count != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          body_path: .release-notes.md

@@ -1,0 +1,30 @@
+## Build
+.build/
+.swiftpm/
+DerivedData/
+Build/
+
+## Xcode
+*.xcuserdata
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+## SPM
+Package.resolved
+
+## macOS
+.DS_Store
+
+## Editor
+*.swp
+.idea/
+.vscode/
+
+## Coverage
+*.profdata
+*.profraw
+
+## Logs
+*.log

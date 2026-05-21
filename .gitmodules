@@ -1,0 +1,3 @@
+[submodule "sdk-spec"]
+	path = sdk-spec
+	url = https://github.com/traffical/sdk-spec.git
