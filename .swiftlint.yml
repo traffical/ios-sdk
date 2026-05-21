@@ -15,6 +15,12 @@ disabled_rules:
   # iteration, etc. Reinstating the default 3-char minimum would just force
   # noise like `key`/`value` everywhere with no real readability gain.
   - identifier_name
+  # Force-try in test helpers (hardcoded fixtures) is acceptable.
+  - force_try
+  # URLProtocol subclasses must use `override class func` to match the
+  # parent signature, so `static_over_final_class` would force unsound
+  # rewrites in test support code.
+  - static_over_final_class
 
 opt_in_rules:
   - empty_count

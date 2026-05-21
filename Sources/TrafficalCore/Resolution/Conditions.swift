@@ -54,8 +54,8 @@ public func evaluateCondition(_ condition: BundleCondition, context: TrafficalCo
 
 /// All conditions must pass for a policy to be eligible.
 public func evaluateConditions(_ conditions: [BundleCondition], context: TrafficalContext) -> Bool {
-    for condition in conditions {
-        if !evaluateCondition(condition, context: context) { return false }
+    for condition in conditions where !evaluateCondition(condition, context: context) {
+        return false
     }
     return true
 }
