@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reads pending changesets, bumps Sources/Traffical/Version.swift, appends to
+# Reads pending changesets, bumps Sources/Traffical/Client/Version.swift, appends to
 # CHANGELOG.md, removes consumed changeset files, writes .release-notes.md for
 # the GitHub release body.
 #
@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-current=$(grep 'SDK_VERSION' Sources/Traffical/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
+current=$(grep 'SDK_VERSION' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
 
 bump="patch"
 notes=""
@@ -36,8 +36,8 @@ case "$bump" in
 esac
 next="${maj}.${min}.${pat}"
 
-sed -i.bak -E "s/SDK_VERSION = \"[^\"]+\"/SDK_VERSION = \"${next}\"/" Sources/Traffical/Version.swift
-rm Sources/Traffical/Version.swift.bak
+sed -i.bak -E "s/SDK_VERSION = \"[^\"]+\"/SDK_VERSION = \"${next}\"/" Sources/Traffical/Client/Version.swift
+rm Sources/Traffical/Client/Version.swift.bak
 
 today=$(date -u +%Y-%m-%d)
 {

@@ -32,7 +32,7 @@ jobs:
         id: bump
         run: |
           bash scripts/bump-version.sh
-          version=$(grep 'SDK_VERSION' Sources/Traffical/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
+          version=$(grep 'SDK_VERSION' Sources/Traffical/Client/Version.swift | sed -E 's/.*"([^"]+)".*/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag
@@ -40,7 +40,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Sources/Traffical/Version.swift CHANGELOG.md .changeset/
+          git add Sources/Traffical/Client/Version.swift CHANGELOG.md .changeset/
           git commit -m "release: v${{ steps.bump.outputs.version }}"
           git tag "v${{ steps.bump.outputs.version }}"
           git push origin main --tags
