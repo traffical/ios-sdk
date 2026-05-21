@@ -23,21 +23,28 @@ jobs:
       - name: Test
         run: swift test --enable-code-coverage
 
-  simulator-test:
+  simulator-build:
+    name: iOS simulator build
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
-
-      - name: Test on iPhone 15 simulator
+      - name: Build SDK for iOS Simulator
         run: |
           set -o pipefail
-          xcodebuild test \
+          xcodebuild build \
             -scheme Traffical \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build sample app for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Examples/TrafficalSampleApp/TrafficalSampleApp.xcodeproj \
+            -scheme TrafficalSampleApp \
             -destination 'platform=iOS Simulator,name=iPhone 15' \
             CODE_SIGNING_ALLOWED=NO
 
