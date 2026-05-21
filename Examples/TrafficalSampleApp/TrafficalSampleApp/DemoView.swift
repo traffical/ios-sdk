@@ -8,8 +8,9 @@ struct DemoView: View {
         NavigationStack {
             List {
                 connectionSection
-                identitySection
+                logsSection
                 parametersSection
+                identitySection
                 eventsSection
                 actionsSection
             }
@@ -149,6 +150,77 @@ struct DemoView: View {
         .padding(.vertical, 2)
     }
 
+    // MARK: Logs
+
+    private var logsSection: some View {
+        Section {
+            if model.logs.isEmpty {
+                Text("No SDK activity yet")
+                    .foregroundStyle(.secondary)
+                    .italic()
+            } else {
+                ForEach(model.logs) { log in
+                    logRow(log)
+                }
+            }
+        } header: {
+            HStack {
+                Text("SDK logs")
+                Spacer()
+                if !model.logs.isEmpty {
+                    Button("Clear") { model.clearLogs() }
+                        .font(.caption)
+                        .textCase(nil)
+                }
+            }
+        }
+    }
+
+    private func logRow(_ log: LogEntry) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(log.category.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(log.color.opacity(0.15)))
+                    .foregroundStyle(log.color)
+                if log.level != "info" {
+                    Text(log.level.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Text(timestampString(log.timestamp))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            Text(log.message)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+            if let url = log.details["url"] {
+                Text(url)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            // Render remaining details as a compact key=value strip.
+            let other = log.details.filter { $0.key != "url" && $0.key != "method" }
+            if !other.isEmpty {
+                Text(other.sorted(by: { $0.key < $1.key }).map { "\($0.key)=\($0.value)" }.joined(separator: "  "))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
     // MARK: Actions
 
     private var actionsSection: some View {
@@ -200,5 +272,11 @@ struct DemoView: View {
         if delta < 60 { return "\(delta)s ago" }
         if delta < 3600 { return "\(delta / 60)m ago" }
         return "\(delta / 3600)h ago"
+    }
+
+    private func timestampString(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
     }
 }

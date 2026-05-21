@@ -72,7 +72,12 @@ public final class TrafficalClient: @unchecked Sendable {
     ) {
         self.options = options
 
-        self.http = TrafficalHTTPClient(baseURL: options.baseURL, apiKey: options.apiKey, session: urlSession)
+        self.http = TrafficalHTTPClient(
+            baseURL: options.baseURL,
+            apiKey: options.apiKey,
+            session: urlSession,
+            debugLogger: options.debugLogger
+        )
         self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env)
         self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env)
         self.bundleCache = BundleCache(projectId: options.projectId, env: options.env, directory: directory)
@@ -298,35 +303,62 @@ public final class TrafficalClient: @unchecked Sendable {
 
     private func refreshBundle() async throws {
         let current = etagSnapshot()
-        let result = try await configFetcher.fetch(etag: current)
-        if let bundle = result.bundle {
-            // Persist + swap in.
-            if let raw = try? JSONSerialization.data(withJSONObject: serialize(bundle: bundle)) {
-                bundleCache.write(raw)
+        logConfig(.info, "config refresh: fetching", details: current.map { ["if-none-match": $0] } ?? [:])
+        do {
+            let result = try await configFetcher.fetch(etag: current)
+            if let bundle = result.bundle {
+                // Persist + swap in.
+                if let raw = try? JSONSerialization.data(withJSONObject: serialize(bundle: bundle)) {
+                    bundleCache.write(raw)
+                }
+                stateLock.lock()
+                currentBundle = bundle
+                etag = result.etag
+                lastSuccessfulRefresh = Date()
+                stateLock.unlock()
+                defaultsStore.setString(result.etag, forKey: "etag")
+                logConfig(.info, "config bundle loaded", details: [
+                    "version": bundle.version,
+                    "parameters": String(bundle.parameters.count),
+                    "layers": String(bundle.layers.count),
+                    "etag": result.etag ?? "—",
+                ])
+            } else if result.notModified {
+                // ETag matched — bundle stays as-is but the refresh did succeed.
+                stateLock.lock()
+                lastSuccessfulRefresh = Date()
+                stateLock.unlock()
+                logConfig(.info, "config not modified (304)", details: ["etag": current ?? "—"])
             }
-            stateLock.lock()
-            currentBundle = bundle
-            etag = result.etag
-            lastSuccessfulRefresh = Date()
-            stateLock.unlock()
-            defaultsStore.setString(result.etag, forKey: "etag")
-        } else if result.notModified {
-            // ETag matched — bundle stays as-is but the refresh did succeed.
-            stateLock.lock()
-            lastSuccessfulRefresh = Date()
-            stateLock.unlock()
+        } catch {
+            logConfig(.error, "config refresh failed: \(error)", details: ["error": "\(error)"])
+            throw error
         }
     }
 
     private func refreshServer() async throws {
-        let response = try await decisionClient.resolve(context: enrichContext([:]))
-        stateLock.lock()
-        serverResponse = response
-        lastSuccessfulRefresh = Date()
-        stateLock.unlock()
-        if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
-            serverCache.write(data)
+        logConfig(.info, "server resolve: fetching")
+        do {
+            let response = try await decisionClient.resolve(context: enrichContext([:]))
+            stateLock.lock()
+            serverResponse = response
+            lastSuccessfulRefresh = Date()
+            stateLock.unlock()
+            if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
+                serverCache.write(data)
+            }
+            logConfig(.info, "server resolve succeeded", details: [
+                "decisionId": response.decisionId,
+                "assignments": String(response.assignments.count),
+            ])
+        } catch {
+            logConfig(.error, "server resolve failed: \(error)", details: ["error": "\(error)"])
+            throw error
         }
+    }
+
+    private func logConfig(_ level: TrafficalDebugEvent.Level, _ message: String, details: [String: String] = [:]) {
+        options.debugLogger?(TrafficalDebugEvent(category: .config, level: level, message: message, details: details))
     }
 
     private func startBackgroundRefresh() {

@@ -1,5 +1,6 @@
 import SwiftUI
 import Traffical
+import os
 
 private let demoOrgId = "org_0uM5pDR6"
 private let demoProjectId = "proj_FYy8hd5j"
@@ -35,6 +36,7 @@ final class DemoModel: ObservableObject {
     @Published var stableID: String = ""
     @Published var resolved: [ResolvedParameter] = []
     @Published var events: [DemoEvent] = []
+    @Published var logs: [LogEntry] = []
     @Published var initialized = false
     @Published var refreshing = false
     @Published var bundleVersion: String? = nil
@@ -58,7 +60,8 @@ final class DemoModel: ObservableObject {
             evaluationMode: .bundle,
             deduplicateAssignmentLogger: false,
             deviceInfoProvider: DefaultDeviceInfoProvider(),
-            assignmentLogger: { [bridge] entry in bridge.forwardExposure(entry) }
+            assignmentLogger: { [bridge] entry in bridge.forwardExposure(entry) },
+            debugLogger: { [bridge] event in bridge.forwardDebug(event) }
         )
         self.client = TrafficalClient(options: options)
         self.stableID = client.getStableID()
@@ -103,12 +106,30 @@ final class DemoModel: ObservableObject {
         recordEvent(DemoEvent.trackEvent(name: "purchase", summary: "\(orderId) · $\(String(format: "%.2f", value))"))
     }
 
+    func clearLogs() {
+        logs.removeAll()
+    }
+
     // MARK: - Internals
 
     fileprivate func recordEvent(_ event: DemoEvent) {
         events.insert(event, at: 0)
         if events.count > 20 { events = Array(events.prefix(20)) }
     }
+
+    fileprivate func recordLog(_ entry: LogEntry) {
+        logs.insert(entry, at: 0)
+        if logs.count > 80 { logs = Array(logs.prefix(80)) }
+        // Mirror into os_log so events also show up in Console.app /
+        // `xcrun simctl spawn log show` for out-of-band debugging.
+        DemoModel.osLog.log("[\(entry.category, privacy: .public)] \(entry.message, privacy: .public)")
+        // Bundle state may have changed (refresh callbacks fire .config events).
+        bundleVersion = client.configVersion
+        bundleLoaded = client.bundleLoaded
+        lastRefresh = client.lastRefreshAt
+    }
+
+    private static let osLog = Logger(subsystem: "io.traffical.SampleApp", category: "sdk")
 
     /// Reads every demo parameter via `decide()` so we have both the
     /// pre-applied default and the resolved value, plus the matched
@@ -160,8 +181,6 @@ enum DemoEvent: Identifiable {
     case track(name: String, summary: String, at: Date)
     case system(message: String, at: Date)
 
-    // Convenience constructors so callers can omit `at:`. Named to avoid
-    // ambiguity with the enum cases.
     static func systemEvent(_ message: String) -> DemoEvent {
         .system(message: message, at: Date())
     }
@@ -209,6 +228,39 @@ enum DemoEvent: Identifiable {
     }
 }
 
+// MARK: - Log entry
+
+struct LogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let category: String   // "http" | "config" | "events" | "lifecycle"
+    let level: String      // "info" | "warn" | "error"
+    let message: String
+    let details: [String: String]
+
+    init(from event: TrafficalDebugEvent) {
+        self.timestamp = event.timestamp
+        self.category = event.category.rawValue
+        self.level = event.level.rawValue
+        self.message = event.message
+        self.details = event.details
+    }
+
+    var color: Color {
+        switch level {
+        case "error": return .red
+        case "warn":  return .orange
+        default:
+            switch category {
+            case "http":      return .indigo
+            case "config":    return .blue
+            case "events":    return .teal
+            default:          return .secondary
+            }
+        }
+    }
+}
+
 // MARK: - Resolved parameter row
 
 struct ResolvedParameter: Identifiable {
@@ -234,8 +286,8 @@ struct ResolvedParameter: Identifiable {
 // MARK: - Event bridge
 //
 // Created before the model is fully initialized, then attached, so the
-// assignment-logger closure on `TrafficalClientOptions` (set during
-// construction) can still reach the model once it exists.
+// closures on `TrafficalClientOptions` (set during construction) can still
+// reach the model once it exists.
 
 final class EventBridge: @unchecked Sendable {
     private let lock = NSLock()
@@ -255,6 +307,12 @@ final class EventBridge: @unchecked Sendable {
                     layerId: entry.layerId
                 )
             )
+        }
+    }
+
+    func forwardDebug(_ event: TrafficalDebugEvent) {
+        Task { @MainActor in
+            self.model?.recordLog(LogEntry(from: event))
         }
     }
 }

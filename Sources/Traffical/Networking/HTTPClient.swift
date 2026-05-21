@@ -26,11 +26,13 @@ public final class TrafficalHTTPClient: @unchecked Sendable {
     public let session: URLSession
     public let baseURL: URL
     public let apiKey: String
+    public let debugLogger: TrafficalDebugLogger?
 
-    public init(baseURL: URL, apiKey: String, session: URLSession? = nil) {
+    public init(baseURL: URL, apiKey: String, session: URLSession? = nil, debugLogger: TrafficalDebugLogger? = nil) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.session = session ?? URLSession(configuration: .ephemeral)
+        self.debugLogger = debugLogger
     }
 
     public func get(path: String, headers: [String: String] = [:]) async throws -> Response {
@@ -42,7 +44,7 @@ public final class TrafficalHTTPClient: @unchecked Sendable {
     }
 
     private func send(method: String, path: String, headers: [String: String], body: Data?) async throws -> Response {
-        let url = baseURL.appendingPathComponent(path)
+        let url = composeURL(base: baseURL, path: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -56,14 +58,63 @@ public final class TrafficalHTTPClient: @unchecked Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
+            log(method: method, urlString: url.absoluteString, status: nil, error: error.localizedDescription)
             throw Failure.transport(error)
         }
 
-        guard let http = response as? HTTPURLResponse else { throw Failure.invalidResponse }
+        guard let http = response as? HTTPURLResponse else {
+            log(method: method, urlString: url.absoluteString, status: nil, error: "invalid response")
+            throw Failure.invalidResponse
+        }
         var headerMap: [String: String] = [:]
         for (key, value) in http.allHeaderFields {
             if let k = key as? String, let v = value as? String { headerMap[k] = v }
         }
+        log(method: method, urlString: url.absoluteString, status: http.statusCode, error: nil)
         return Response(statusCode: http.statusCode, data: data, headers: headerMap)
+    }
+
+    /// Joins `baseURL` with a path that may include a `?query`. `URL.appending
+    /// PathComponent` percent-encodes the entire string so a `?` becomes `%3F`
+    /// and the query is treated as a path segment. We split on the first `?`
+    /// instead, append the path part properly, then set the query on the
+    /// resulting `URLComponents`.
+    func composeURL(base: URL, path: String) -> URL {
+        let pathPart: String
+        let queryPart: String?
+        if let q = path.firstIndex(of: "?") {
+            pathPart = String(path[..<q])
+            queryPart = String(path[path.index(after: q)...])
+        } else {
+            pathPart = path
+            queryPart = nil
+        }
+        let withPath = base.appendingPathComponent(pathPart)
+        guard let queryPart = queryPart,
+              var components = URLComponents(url: withPath, resolvingAgainstBaseURL: false) else {
+            return withPath
+        }
+        components.query = queryPart
+        return components.url ?? withPath
+    }
+
+    private func log(method: String, urlString: String, status: Int?, error: String?) {
+        guard let debugLogger = debugLogger else { return }
+        let level: TrafficalDebugEvent.Level
+        let message: String
+        if let error = error {
+            level = .error
+            message = "\(method) \(urlString) — \(error)"
+        } else if let status = status {
+            level = (200..<400).contains(status) ? .info : .warn
+            message = "\(method) \(urlString) → \(status)"
+        } else {
+            level = .warn
+            message = "\(method) \(urlString) — no response"
+        }
+        var details: [String: String] = ["method": method, "url": urlString]
+        if let status = status { details["status"] = String(status) }
+        if let error = error { details["error"] = error }
+        debugLogger(TrafficalDebugEvent(category: .http, level: level, message: message, details: details))
     }
 }

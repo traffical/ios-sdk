@@ -17,6 +17,7 @@ public struct TrafficalClientOptions: Sendable {
     public var deduplicateAssignmentLogger: Bool
     public var deviceInfoProvider: DeviceInfoProvider?
     public var assignmentLogger: TrafficalAssignmentLogger?
+    public var debugLogger: TrafficalDebugLogger?
 
     public enum EvaluationMode: String, Sendable {
         case bundle
@@ -42,7 +43,8 @@ public struct TrafficalClientOptions: Sendable {
         disableCloudEvents: Bool = false,
         deduplicateAssignmentLogger: Bool = true,
         deviceInfoProvider: DeviceInfoProvider? = nil,
-        assignmentLogger: TrafficalAssignmentLogger? = nil
+        assignmentLogger: TrafficalAssignmentLogger? = nil,
+        debugLogger: TrafficalDebugLogger? = nil
     ) {
         self.orgId = orgId
         self.projectId = projectId
@@ -58,5 +60,6 @@ public struct TrafficalClientOptions: Sendable {
         self.deduplicateAssignmentLogger = deduplicateAssignmentLogger
         self.deviceInfoProvider = deviceInfoProvider
         self.assignmentLogger = assignmentLogger
+        self.debugLogger = debugLogger
     }
 }
