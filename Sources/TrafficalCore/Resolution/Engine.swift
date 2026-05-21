@@ -100,14 +100,10 @@ func resolveInternal(
         )
     }
 
-    guard let unitKeyValue = getUnitKeyValue(bundle: bundle, context: context) else {
-        return ResolutionResult(
-            assignments: assignments,
-            unitKeyValue: "",
-            layers: layers,
-            matchedPolicies: matchedPolicies
-        )
-    }
+    // Project-level unit key. Layers that don't override `unitKey` use this.
+    // We no longer bail out when this is missing — some layers in multi-entity
+    // projects may still resolve via their own unit key.
+    let projectUnitKeyValue = getUnitKeyValue(bundle: bundle, context: context) ?? ""
 
     let requestedKeys = Set(defaults.keys)
 
@@ -124,8 +120,38 @@ func resolveInternal(
         let layerParams = paramsByLayer[layer.id]
         let hasParams = (layerParams?.isEmpty == false)
 
+        // Per-layer unit key resolution. Layers may override `unitKey` to
+        // read a different context field (e.g. merchantId in a userId project).
+        let layerUnitKey = layer.unitKey
+        let layerUnitValue: String
+        if let override = layerUnitKey {
+            if let raw = context[override], !raw.isMissing {
+                layerUnitValue = raw.stringValue ?? (raw.numberValue.map { n in
+                    n.rounded() == n ? String(Int64(n)) : String(n)
+                } ?? (raw.boolValue.map { $0 ? "true" : "false" } ?? ""))
+            } else {
+                layerUnitValue = ""
+            }
+        } else {
+            layerUnitValue = projectUnitKeyValue
+        }
+
+        // When the unit value can't be resolved, emit a skipped layer with
+        // bucket = -1 so decision events still record it, but skip policy
+        // matching.
+        if layerUnitValue.isEmpty {
+            layers.append(TrafficalLayerResolution(
+                layerId: layer.id,
+                bucket: -1,
+                unitKey: layerUnitKey,
+                unitKeyValue: layerUnitKey != nil ? "" : nil,
+                attributionOnly: !hasParams
+            ))
+            continue
+        }
+
         let bucket = computeBucket(
-            unitKeyValue: unitKeyValue,
+            unitKeyValue: layerUnitValue,
             layerId: layer.id,
             bucketCount: bundle.hashing.bucketCount
         )
@@ -143,7 +169,7 @@ func resolveInternal(
                 if let ctxAlloc = resolveContextualPolicy(
                     policy: policy,
                     context: context,
-                    unitKeyValue: unitKeyValue
+                    unitKeyValue: layerUnitValue
                 ) {
                     matchedPolicy = policy
                     matchedAllocation = ctxAlloc
@@ -162,7 +188,7 @@ func resolveInternal(
                         bundle: bundle,
                         policy: policy,
                         context: context,
-                        unitKeyValue: unitKeyValue
+                        unitKeyValue: layerUnitValue
                     ) {
                         matchedPolicy = policy
                         matchedAllocation = result.allocation
@@ -180,7 +206,6 @@ func resolveInternal(
                         matchedPolicies.append(policy)
                         if let dynamic = entityConfig.dynamicAllocations {
                             _ = dynamic
-                            // Synthesize a dynamic allocation from the index.
                             matchedAllocation = BundleAllocation(
                                 id: "\(policy.id)_dynamic_\(edge.allocationIndex)",
                                 name: String(edge.allocationIndex),
@@ -219,13 +244,15 @@ func resolveInternal(
             allocationId: matchedAllocation?.id,
             allocationName: matchedAllocation?.name,
             allocationKey: matchedAllocation?.key,
+            unitKey: layerUnitKey,
+            unitKeyValue: layerUnitKey != nil ? layerUnitValue : nil,
             attributionOnly: !hasParams
         ))
     }
 
     return ResolutionResult(
         assignments: assignments,
-        unitKeyValue: unitKeyValue,
+        unitKeyValue: projectUnitKeyValue,
         layers: layers,
         matchedPolicies: matchedPolicies
     )

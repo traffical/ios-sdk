@@ -45,6 +45,11 @@ public struct TrafficalLayerResolution: Sendable, Equatable {
     public var allocationId: String?
     public var allocationName: String?
     public var allocationKey: String?
+    /// Present only when the layer overrides the project-level `hashing.unitKey`.
+    public var unitKey: String?
+    /// Present only when `unitKey` is set. The resolved context value for the
+    /// layer-level unit key.
+    public var unitKeyValue: String?
     /// `true` when this layer was resolved only for attribution (no parameter
     /// from this layer was requested by the caller). `trackExposure` skips
     /// these to avoid inflating exposure counts.
@@ -58,6 +63,8 @@ public struct TrafficalLayerResolution: Sendable, Equatable {
         allocationId: String? = nil,
         allocationName: String? = nil,
         allocationKey: String? = nil,
+        unitKey: String? = nil,
+        unitKeyValue: String? = nil,
         attributionOnly: Bool = false
     ) {
         self.layerId = layerId
@@ -67,6 +74,8 @@ public struct TrafficalLayerResolution: Sendable, Equatable {
         self.allocationId = allocationId
         self.allocationName = allocationName
         self.allocationKey = allocationKey
+        self.unitKey = unitKey
+        self.unitKeyValue = unitKeyValue
         self.attributionOnly = attributionOnly
     }
 }
