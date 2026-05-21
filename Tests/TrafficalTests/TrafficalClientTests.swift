@@ -42,10 +42,21 @@ final class TrafficalClientTests: XCTestCase {
             )
         }
         let client = makeClient(mode: .bundle)
+        XCTAssertNil(client.lastRefreshAt)
         await client.initialize()
         XCTAssertTrue(client.isInitialized)
+        XCTAssertTrue(client.bundleLoaded)
+        XCTAssertEqual(client.configVersion, "v")
+        XCTAssertNotNil(client.lastRefreshAt)
         let color = client.string("ui.color", default: "#FFF")
         XCTAssertTrue(["#0000FF", "#FF0000"].contains(color))
+    }
+
+    func test_debug_accessors_before_initialize() {
+        let client = makeClient(mode: .bundle)
+        XCTAssertFalse(client.bundleLoaded)
+        XCTAssertNil(client.configVersion)
+        XCTAssertNil(client.lastRefreshAt)
     }
 
     func test_initialize_in_server_mode_uses_resolve_endpoint() async throws {

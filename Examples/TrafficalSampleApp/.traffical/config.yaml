@@ -1,0 +1,40 @@
+# Traffical configuration for the iOS sample app.
+#
+# These parameters are the ones the sample app reads in `App.swift`. After
+# editing this file, run `traffical push` from this directory to sync the
+# parameters with Traffical; the dashboard will then show them as
+# version-controlled (read-only base defaults).
+#
+# To make the sample app demonstrate bucketing visibly, add a static policy
+# to one of these parameters in the dashboard (e.g. `ui.color` with two
+# allocations) — re-rolling the user in the app will then flip values.
+
+version: "1.0"
+project:
+  id: proj_FYy8hd5j
+  orgId: org_0uM5pDR6
+
+parameters:
+  ui.color:
+    type: string
+    default: "#1E6EFB"
+    namespace: ui
+    description: Primary action color shown in the sample app. A/B-tested in the demo.
+
+  checkout.ctaText:
+    type: string
+    default: "Subscribe"
+    namespace: checkout
+    description: Text on the primary CTA button. Good candidate for copy experiments.
+
+  mobile.onboarding_steps:
+    type: number
+    default: 3
+    namespace: mobile
+    description: Number of onboarding steps to show new users on first launch.
+
+events:
+  purchase:
+    valueType: currency
+    unit: USD
+    description: User completed a purchase. Fires from the sample app's "Track purchase" button.

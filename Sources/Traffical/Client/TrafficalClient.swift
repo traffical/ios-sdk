@@ -32,7 +32,36 @@ public final class TrafficalClient: @unchecked Sendable {
     private var etag: String?
     private var overrides: [String: TrafficalParameterValue] = [:]
     private var refreshTask: Task<Void, Never>?
+    private var lastSuccessfulRefresh: Date?
     private(set) public var isInitialized: Bool = false
+
+    // MARK: - Debug accessors
+    //
+    // Read-only snapshots intended for debug overlays / dev tools / sample
+    // apps. They reflect the same internal state used by the resolver.
+
+    /// The version string of the currently-active bundle, or `nil` if no
+    /// bundle is cached. In server mode this returns the `stateVersion`
+    /// reported by the most recent `/v1/resolve` response.
+    public var configVersion: String? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return serverResponse?.stateVersion ?? currentBundle?.version
+    }
+
+    /// `true` when the SDK has a usable bundle (local, disk-cached, or
+    /// network-fetched). In server mode, `true` once a cached resolve
+    /// response is available.
+    public var bundleLoaded: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return currentBundle != nil || serverResponse != nil
+    }
+
+    /// Timestamp of the last successful network refresh, or `nil` if the SDK
+    /// has not yet talked to the backend in this session.
+    public var lastRefreshAt: Date? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return lastSuccessfulRefresh
+    }
 
     public init(
         options: TrafficalClientOptions,
@@ -278,10 +307,14 @@ public final class TrafficalClient: @unchecked Sendable {
             stateLock.lock()
             currentBundle = bundle
             etag = result.etag
+            lastSuccessfulRefresh = Date()
             stateLock.unlock()
             defaultsStore.setString(result.etag, forKey: "etag")
         } else if result.notModified {
-            // ETag matched — nothing to do.
+            // ETag matched — bundle stays as-is but the refresh did succeed.
+            stateLock.lock()
+            lastSuccessfulRefresh = Date()
+            stateLock.unlock()
         }
     }
 
@@ -289,6 +322,7 @@ public final class TrafficalClient: @unchecked Sendable {
         let response = try await decisionClient.resolve(context: enrichContext([:]))
         stateLock.lock()
         serverResponse = response
+        lastSuccessfulRefresh = Date()
         stateLock.unlock()
         if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
             serverCache.write(data)
