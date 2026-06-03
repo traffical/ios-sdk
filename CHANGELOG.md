@@ -1,3 +1,8 @@
+## 0.3.0 — 2026-06-03
+
+- Add warehouse-native fields to the assignment logger and emit on `decide()`. `TrafficalAssignmentLogEntry` now carries `type` (`TrafficalAssignmentType`: `.decision` / `.exposure`), `decisionId`, `anonymousId`, and `id`, bringing the BYO assignment logger in line with the JS SDK and the managed `sdk_assignments` schema. - `AssignmentLogEmitter.emit(decision:type:anonymousId:)` stamps each entry with its `type`, the originating `decisionId`, the stable/anonymous id, and a fresh `asn_` id (new `TrafficalIDGenerator.assignmentId()`). - `type` participates in dedup, so a unit/policy/allocation can emit both a `.decision` row (from `decide()`) and an `.exposure` row (from `trackExposure()`). - `TrafficalClient` now emits assignment entries on `decide()` (with `type: .decision`) in addition to `trackExposure()` (`type: .exposure`), for parity with the JS SDK.
+
+
 ## 0.2.0 — 2026-05-21
 
 - Add a structured debug log channel for in-app overlays and dev tools. - New `TrafficalDebugEvent` (`category` × `level` × `message` × `details` map) and `TrafficalDebugLogger` typealias. - New `TrafficalClientOptions.debugLogger` option. - `TrafficalHTTPClient` emits one event per request (method, URL, status, or error). - `TrafficalClient` emits config-refresh lifecycle events: fetching, loaded (with version, etag, parameter and layer counts), 304 not modified, and failed. Also adds read-only debug accessors on `TrafficalClient`: `configVersion`, `bundleLoaded`, `lastRefreshAt`.
