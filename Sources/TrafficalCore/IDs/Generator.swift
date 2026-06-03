@@ -12,6 +12,7 @@ public enum TrafficalIDGenerator {
     public static func decisionId() -> String { random(prefix: "dec") }
     public static func exposureId() -> String { random(prefix: "exp") }
     public static func trackEventId() -> String { random(prefix: "trk") }
+    public static func assignmentId() -> String { random(prefix: "asn") }
 
     private static func random(prefix: String) -> String {
         var rng = SystemRandomNumberGenerator()

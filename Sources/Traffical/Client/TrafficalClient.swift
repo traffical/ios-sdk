@@ -221,13 +221,13 @@ public final class TrafficalClient: @unchecked Sendable {
     /// is actually shown (matches `@traffical/js-client`).
     public func trackExposure(_ decision: TrafficalDecisionResult) {
         guard !options.disableCloudEvents else {
-            assignmentEmitter?.emit(decision: decision)
+            assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
             return
         }
         let unitKey = decision.metadata.unitKeyValue
         guard !unitKey.isEmpty else { return }
 
-        assignmentEmitter?.emit(decision: decision)
+        assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
 
         for layer in decision.metadata.layers {
             guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
@@ -418,6 +418,8 @@ public final class TrafficalClient: @unchecked Sendable {
         )
 
         attributionMap.record(decision: final)
+
+        assignmentEmitter?.emit(decision: final, type: .decision, anonymousId: stableIDProvider.getID())
 
         if options.trackDecisions && !options.disableCloudEvents {
             let event = TrafficalDecisionEvent(

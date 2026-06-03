@@ -15,20 +15,50 @@ final class AssignmentLoggerTests: XCTestCase {
         let emitter = AssignmentLogEmitter(orgId: "org", projectId: "proj", env: "prod") {
             captured.value.append($0)
         }
-        emitter.emit(decision: makeDecision())
+        emitter.emit(decision: makeDecision(), type: .decision)
         XCTAssertEqual(captured.value.count, 2)
         XCTAssertEqual(Set(captured.value.map(\.policyId)), ["p1", "p2"])
     }
 
-    func test_dedup_suppresses_repeat_emits_for_same_unit_policy_allocation() {
+    func test_dedup_suppresses_repeat_emits_for_same_unit_policy_allocation_type() {
         let captured = Box([TrafficalAssignmentLogEntry]())
         let emitter = AssignmentLogEmitter(orgId: "org", projectId: "proj", env: "prod") {
             captured.value.append($0)
         }
         let decision = makeDecision()
-        emitter.emit(decision: decision)
-        emitter.emit(decision: decision)
+        emitter.emit(decision: decision, type: .decision)
+        emitter.emit(decision: decision, type: .decision)
         XCTAssertEqual(captured.value.count, 2)
+    }
+
+    func test_decision_and_exposure_produce_two_distinct_rows_per_layer() {
+        let captured = Box([TrafficalAssignmentLogEntry]())
+        let emitter = AssignmentLogEmitter(orgId: "org", projectId: "proj", env: "prod") {
+            captured.value.append($0)
+        }
+        let decision = makeDecision()
+        emitter.emit(decision: decision, type: .decision)
+        emitter.emit(decision: decision, type: .exposure)
+        // 2 layers x 2 types = 4 rows; dedup only suppresses same type.
+        XCTAssertEqual(captured.value.count, 4)
+        XCTAssertEqual(captured.value.filter { $0.type == .decision }.count, 2)
+        XCTAssertEqual(captured.value.filter { $0.type == .exposure }.count, 2)
+    }
+
+    func test_emitted_entries_carry_new_fields() {
+        let captured = Box([TrafficalAssignmentLogEntry]())
+        let emitter = AssignmentLogEmitter(orgId: "org", projectId: "proj", env: "prod") {
+            captured.value.append($0)
+        }
+        emitter.emit(decision: makeDecision(), type: .exposure, anonymousId: "anon_1")
+        XCTAssertFalse(captured.value.isEmpty)
+        for entry in captured.value {
+            XCTAssertEqual(entry.type, .exposure)
+            XCTAssertEqual(entry.decisionId, "dec_1")
+            XCTAssertEqual(entry.anonymousId, "anon_1")
+            XCTAssertNotNil(entry.id)
+            XCTAssertTrue(entry.id?.hasPrefix("asn_") ?? false)
+        }
     }
 
     func test_dedup_disabled_emits_every_time() {
@@ -37,8 +67,8 @@ final class AssignmentLoggerTests: XCTestCase {
             orgId: "org", projectId: "proj", env: "prod", deduplicate: false
         ) { captured.value.append($0) }
         let decision = makeDecision()
-        emitter.emit(decision: decision)
-        emitter.emit(decision: decision)
+        emitter.emit(decision: decision, type: .decision)
+        emitter.emit(decision: decision, type: .decision)
         XCTAssertEqual(captured.value.count, 4)
     }
 

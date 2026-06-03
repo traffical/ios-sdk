@@ -118,6 +118,13 @@ public struct TrafficalDecisionEvent: Sendable {
     }
 }
 
+/// Discriminator for which call produced an assignment row.
+/// A subset of the canonical event `type` discriminator.
+public enum TrafficalAssignmentType: String, Sendable {
+    case decision
+    case exposure
+}
+
 /// Warehouse-native assignment log entry.
 public struct TrafficalAssignmentLogEntry: Sendable {
     public var unitKey: String
@@ -134,6 +141,14 @@ public struct TrafficalAssignmentLogEntry: Sendable {
     public var sdkName: String?
     public var sdkVersion: String?
     public var properties: TrafficalContext?
+    /// Event type that produced this row: matches the event `type` discriminator.
+    public var type: TrafficalAssignmentType
+    /// Decision that produced this assignment (decision.decisionId).
+    public var decisionId: String?
+    /// Anonymous/stable id when available (client SDKs).
+    public var anonymousId: String?
+    /// Unique id for this assignment log entry.
+    public var id: String?
 
     public init(
         unitKey: String,
@@ -149,7 +164,11 @@ public struct TrafficalAssignmentLogEntry: Sendable {
         env: String,
         sdkName: String? = nil,
         sdkVersion: String? = nil,
-        properties: TrafficalContext? = nil
+        properties: TrafficalContext? = nil,
+        type: TrafficalAssignmentType,
+        decisionId: String? = nil,
+        anonymousId: String? = nil,
+        id: String? = nil
     ) {
         self.unitKey = unitKey
         self.policyId = policyId
@@ -165,5 +184,9 @@ public struct TrafficalAssignmentLogEntry: Sendable {
         self.sdkName = sdkName
         self.sdkVersion = sdkVersion
         self.properties = properties
+        self.type = type
+        self.decisionId = decisionId
+        self.anonymousId = anonymousId
+        self.id = id
     }
 }

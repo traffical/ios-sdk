@@ -31,12 +31,16 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
         self.dedup = deduplicate ? ExposureDeduplicator() : nil
     }
 
-    public func emit(decision: TrafficalDecisionResult) {
+    public func emit(
+        decision: TrafficalDecisionResult,
+        type: TrafficalAssignmentType,
+        anonymousId: String? = nil
+    ) {
         let unitKey = decision.metadata.unitKeyValue
         guard !unitKey.isEmpty else { return }
         for layer in decision.metadata.layers {
             guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
-            if let dedup = dedup, !dedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
+            if let dedup = dedup, !dedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: "\(allocationName):\(type.rawValue)") {
                 continue
             }
             let entry = TrafficalAssignmentLogEntry(
@@ -53,7 +57,11 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
                 env: env,
                 sdkName: trafficalSDKName,
                 sdkVersion: trafficalSDKVersion,
-                properties: decision.metadata.filteredContext
+                properties: decision.metadata.filteredContext,
+                type: type,
+                decisionId: decision.decisionId,
+                anonymousId: anonymousId,
+                id: TrafficalIDGenerator.assignmentId()
             )
             logger(entry)
         }
