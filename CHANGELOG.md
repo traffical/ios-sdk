@@ -1,3 +1,8 @@
+## 0.4.0 — 2026-06-04
+
+- Switch deterministic assignment from FNV-1a to the SHA-256 v2 hash. Buckets and weighted selection now derive from the first 64 bits (unsigned big-endian) of `SHA256("traffical:assignment:v2|u:<utf8ByteLen>:<unit>|l:<utf8ByteLen>:<layer>")`, computed with CryptoKit over UTF-8 bytes. This fixes the cross-experiment correlation FNV-1a exhibited on realistic UUID/ULID units and `lay_*` layer IDs, and also resolves the previous UTF-16-vs-UTF-8 framing divergence since v2 framing is byte-based. BREAKING: every unit re-buckets on upgrade. There is no migration path (no prior production users).
+
+
 ## 0.3.0 — 2026-06-03
 
 - Add warehouse-native fields to the assignment logger and emit on `decide()`. `TrafficalAssignmentLogEntry` now carries `type` (`TrafficalAssignmentType`: `.decision` / `.exposure`), `decisionId`, `anonymousId`, and `id`, bringing the BYO assignment logger in line with the JS SDK and the managed `sdk_assignments` schema. - `AssignmentLogEmitter.emit(decision:type:anonymousId:)` stamps each entry with its `type`, the originating `decisionId`, the stable/anonymous id, and a fresh `asn_` id (new `TrafficalIDGenerator.assignmentId()`). - `type` participates in dedup, so a unit/policy/allocation can emit both a `.decision` row (from `decide()`) and an `.exposure` row (from `trackExposure()`). - `TrafficalClient` now emits assignment entries on `decide()` (with `type: .decision`) in addition to `trackExposure()` (`type: .exposure`), for parity with the JS SDK.
