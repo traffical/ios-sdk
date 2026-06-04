@@ -9,8 +9,8 @@ import Foundation
 ///   2. Apply softmax with temperature `gamma` to convert scores -> probabilities.
 ///   3. Apply `actionProbabilityFloor`: anything below the floor is clamped, then
 ///      renormalize.
-///   4. Seed FNV-1a with `"ctx:" + unitKeyValue + ":" + policyId` and use
-///      `weightedSelection` to deterministically pick an allocation index.
+///   4. Seed the SHA-256 v2 hash with `"ctx:" + unitKeyValue + ":" + policyId`
+///      and use `weightedSelection` to deterministically pick an allocation index.
 ///
 /// Returns `nil` when the policy has no `contextualModel` (graceful fall-through
 /// to bucket-based allocation) or no allocations to pick from.

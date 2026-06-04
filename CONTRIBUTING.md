@@ -24,7 +24,7 @@ so the spec test vectors at `sdk-spec/test-vectors/fixtures/` are available.
 swift test
 
 # Single suite.
-swift test --filter TrafficalCoreTests.FNV1aTests
+swift test --filter TrafficalCoreTests.AssignmentHashTests
 
 # Simulator (matches CI).
 xcodebuild test \

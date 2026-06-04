@@ -59,7 +59,7 @@ ios-sdk/
 ├── Sources/
 │   ├── TrafficalCore/
 │   │   ├── Types/             # ConfigBundle, ParameterValue, Context, DecisionResult, Events
-│   │   ├── Hashing/           # FNV1a, Bucket, WeightedSelection
+│   │   ├── Hashing/           # AssignmentHash (SHA-256 v2), Bucket, WeightedSelection
 │   │   ├── Resolution/        # Conditions, Engine, PerEntity
 │   │   ├── Scoring/           # Contextual
 │   │   ├── IDs/               # ULID + nanoid
@@ -90,7 +90,7 @@ bottom of this file.
 | # | Stage | Tag at end | Conformance scope |
 |---|---|---|---|
 | 0 | Bootstrap repo (Package.swift, CI, lint, submodule, PrivacyInfo, README, changesets glue) | — | — |
-| 1 | `TrafficalCore` resolution engine (types, FNV-1a, bucket, conditions, engine) | 0.0.1 | `bundle_basic`, `bundle_conditions` |
+| 1 | `TrafficalCore` resolution engine (types, SHA-256 v2, bucket, conditions, engine) | 0.0.1 | `bundle_basic`, `bundle_conditions` |
 | 2 | Contextual + per-entity bundle mode | 0.0.2 | `bundle_contextual`, `entity_weights` |
 | 3 | Networking + persistence (HTTP, ETag, file cache, Keychain) | 0.0.3 | — |
 | 4 | Server mode + edge per-entity | 0.0.4 | `expected_edge_policies`, `expected_resolve` — full conformance |
@@ -118,7 +118,7 @@ CI runs all of the above on every PR on macOS + iOS Simulator + Linux (Core only
 | Stage | Status | Notes |
 |---|---|---|
 | 0 | done | repo, Package.swift, CI, lint, changesets, submodule, PrivacyInfo |
-| 1 | done | core engine + types + FNV-1a + bucket + conditions; bundle_basic + bundle_conditions conformance green |
+| 1 | done | core engine + types + SHA-256 v2 + bucket + conditions; bundle_basic + bundle_conditions conformance green |
 | 2 | done | contextual scoring + per-entity bundle resolution; bundle_contextual conformance green |
 | 3 | done | URLSession HTTPClient, ConfigFetcher with ETag, BundleCache, KeychainStore, StableIDProvider, DefaultsStore |
 | 4 | done | DecisionClient (resolve + entity batch), ServerResponseCache, expected_edge_policies + expected_resolve conformance green |

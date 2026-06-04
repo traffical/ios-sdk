@@ -80,13 +80,15 @@ final class ContextualTests: XCTestCase {
         XCTAssertEqual(allocation?.name, "treatment_a")
     }
 
-    func test_full_pipeline_falls_back_to_treatment_a_for_missing_context() {
+    func test_full_pipeline_falls_back_to_control_for_missing_context() {
+        // Mirrors the `missing_context_fields` fixture case: with SHA-256 v2
+        // weighted selection the hash lands on the control allocation.
         let policy = makeContextualPolicy()
         let context: TrafficalContext = [
             "userId": .string("user-missing-ctx"),
         ]
         let allocation = resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-missing-ctx")
-        XCTAssertEqual(allocation?.name, "treatment_a")
+        XCTAssertEqual(allocation?.name, "control")
     }
 
     private func makeContextualPolicy() -> BundlePolicy {

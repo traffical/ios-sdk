@@ -18,7 +18,7 @@ Initial release. Feature parity with `@traffical/js-client` and
 
 ### Engine (`TrafficalCore`)
 
-- FNV-1a 32-bit hashing, bucket assignment, deterministic weighted selection
+- SHA-256 v2 assignment hashing, bucket assignment, deterministic weighted selection
 - 14 condition operators (`eq`, `neq`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`,
   `contains`, `startsWith`, `endsWith`, `regex`, `exists`, `notExists`)
 - Layered resolution engine with `eligibleBucketRange` and attribution-only

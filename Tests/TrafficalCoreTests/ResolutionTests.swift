@@ -261,17 +261,17 @@ final class ResolutionTests: XCTestCase {
             defaults: ["ui.theme": .string("light"), "pricing.merchantDiscount": .number(0)]
         )
 
-        // layer_user_ui: hashes on userId (project default) → bucket 73 → control
+        // layer_user_ui: hashes on userId (project default) → bucket 641 → dark_mode
         let uiLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_user_ui" })
         XCTAssertNotNil(uiLayer)
-        XCTAssertEqual(uiLayer?.bucket, 73)
+        XCTAssertEqual(uiLayer?.bucket, 641)
         XCTAssertNil(uiLayer?.unitKey)
         XCTAssertNil(uiLayer?.unitKeyValue)
 
-        // layer_merchant_pricing: hashes on merchantId → bucket 628 → discount_15
+        // layer_merchant_pricing: hashes on merchantId → bucket 764 → discount_15
         let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
         XCTAssertNotNil(pricingLayer)
-        XCTAssertEqual(pricingLayer?.bucket, 628)
+        XCTAssertEqual(pricingLayer?.bucket, 764)
         XCTAssertEqual(pricingLayer?.unitKey, "merchantId")
         XCTAssertEqual(pricingLayer?.unitKeyValue, "merchant-1")
         XCTAssertEqual(pricingLayer?.allocationName, "discount_15")
@@ -290,7 +290,7 @@ final class ResolutionTests: XCTestCase {
         // user layer still resolves
         let uiLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_user_ui" })
         XCTAssertNotNil(uiLayer)
-        XCTAssertEqual(uiLayer?.bucket, 73)
+        XCTAssertEqual(uiLayer?.bucket, 641)
 
         // merchant layer is skipped
         let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
@@ -319,7 +319,7 @@ final class ResolutionTests: XCTestCase {
         // merchant layer resolves independently
         let pricingLayer = decision.metadata.layers.first(where: { $0.layerId == "layer_merchant_pricing" })
         XCTAssertNotNil(pricingLayer)
-        XCTAssertEqual(pricingLayer?.bucket, 628)
+        XCTAssertEqual(pricingLayer?.bucket, 764)
         XCTAssertEqual(pricingLayer?.allocationName, "discount_15")
         XCTAssertEqual(decision.assignments["pricing.merchantDiscount"], .number(15))
 
