@@ -76,8 +76,8 @@ final class ContextualTests: XCTestCase {
             "engagement_score": .number(8.0),
             "device_type": .string("mobile"),
         ]
-        let allocation = resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-high-engage")
-        XCTAssertEqual(allocation?.name, "treatment_a")
+        let result = resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-high-engage")
+        XCTAssertEqual(result?.allocation.name, "treatment_a")
     }
 
     func test_full_pipeline_falls_back_to_control_for_missing_context() {
@@ -87,8 +87,37 @@ final class ContextualTests: XCTestCase {
         let context: TrafficalContext = [
             "userId": .string("user-missing-ctx"),
         ]
-        let allocation = resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-missing-ctx")
-        XCTAssertEqual(allocation?.name, "control")
+        let result = resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-missing-ctx")
+        XCTAssertEqual(result?.allocation.name, "control")
+    }
+
+    func test_resolve_returns_floored_softmax_probability_of_chosen_allocation() throws {
+        let policy = makeContextualPolicy()
+        let context: TrafficalContext = [
+            "userId": .string("user-high-engage"),
+            "engagement_score": .number(8.0),
+            "device_type": .string("mobile"),
+        ]
+        let result = try XCTUnwrap(
+            resolveContextualPolicy(policy: policy, context: context, unitKeyValue: "user-high-engage")
+        )
+
+        // Recompute the pipeline by hand: scores -> softmax -> floor.
+        let model = try XCTUnwrap(policy.contextualModel)
+        let scores = policy.allocations.map { alloc -> Double in
+            guard let coef = model.coefficients[alloc.name] else { return model.defaultAllocationScore }
+            return computeAllocationScore(coefficients: coef, context: context)
+        }
+        let expected = applyProbabilityFloor(
+            probabilities: softmaxProbabilities(scores: scores, gamma: model.gamma),
+            floor: model.actionProbabilityFloor
+        )
+        let chosenIndex = try XCTUnwrap(policy.allocations.firstIndex(where: { $0.name == result.allocation.name }))
+        XCTAssertEqual(result.probability, expected[chosenIndex], accuracy: 1e-9)
+        XCTAssertGreaterThan(result.probability, 0)
+        XCTAssertLessThanOrEqual(result.probability, 1)
+        // The floor guarantees at least actionProbabilityFloor exploration.
+        XCTAssertGreaterThanOrEqual(result.probability, model.actionProbabilityFloor - 1e-9)
     }
 
     private func makeContextualPolicy() -> BundlePolicy {

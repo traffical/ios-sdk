@@ -192,6 +192,8 @@ func decodeLayerResolution(_ dict: [String: Any]) -> TrafficalLayerResolution {
         allocationKey: dict["allocationKey"] as? String,
         unitKey: dict["unitKey"] as? String,
         unitKeyValue: dict["unitKeyValue"] as? String,
+        probability: numericDouble(dict["probability"]),
+        modelVersion: dict["modelVersion"] as? String,
         attributionOnly: (dict["attributionOnly"] as? Bool) ?? false
     )
 }

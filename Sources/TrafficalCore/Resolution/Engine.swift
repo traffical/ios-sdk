@@ -60,7 +60,8 @@ public func decide(
             timestamp: TrafficalTime.now(),
             unitKeyValue: result.unitKeyValue,
             layers: result.layers,
-            filteredContext: filteredContext
+            filteredContext: filteredContext,
+            configVersion: bundle?.version
         )
     )
 }
@@ -158,6 +159,14 @@ func resolveInternal(
 
         var matchedPolicy: BundlePolicy?
         var matchedAllocation: BundleAllocation?
+        // Propensity of the chosen allocation at decision time. Populated for
+        // adaptive policies only (contextual softmax probability, per-entity
+        // weight, or bucket-range share); stays nil for static policies so the
+        // field is omitted on the wire.
+        var matchedProbability: Double?
+        // Only for linear_contextual: the timestamp of the model coefficients
+        // that produced this decision.
+        var matchedModelVersion: String?
 
         for policy in layer.policies {
             if policy.state != .running { continue }
@@ -165,16 +174,21 @@ func resolveInternal(
             if !evaluateConditions(policy.conditions, context: context) { continue }
 
             // Contextual model takes precedence over standard bucket assignment.
-            if policy.contextualModel != nil {
-                if let ctxAlloc = resolveContextualPolicy(
+            if let model = policy.contextualModel {
+                if let ctx = resolveContextualPolicy(
                     policy: policy,
                     context: context,
                     unitKeyValue: layerUnitValue
                 ) {
                     matchedPolicy = policy
-                    matchedAllocation = ctxAlloc
+                    matchedAllocation = ctx.allocation
+                    matchedProbability = ctx.probability
+                    // Prefer the model's own training timestamp (or its
+                    // `modelVersion` alias); older bundles fall back to the
+                    // policy's optimization-state version.
+                    matchedModelVersion = model.generatedAt ?? model.modelVersion ?? policy.stateVersion
                     matchedPolicies.append(policy)
-                    if hasParams { applyOverrides(ctxAlloc.overrides, to: &assignments) }
+                    if hasParams { applyOverrides(ctx.allocation.overrides, to: &assignments) }
                     break
                 }
             }
@@ -192,6 +206,8 @@ func resolveInternal(
                     ) {
                         matchedPolicy = policy
                         matchedAllocation = result.allocation
+                        // The weight the SDK actually used for selection.
+                        matchedProbability = result.probability
                         matchedPolicies.append(policy)
                         if hasParams && entityConfig.dynamicAllocations == nil {
                             applyOverrides(result.allocation.overrides, to: &assignments)
@@ -230,6 +246,13 @@ func resolveInternal(
             if let alloc = findMatchingAllocation(bucket: bucket, in: policy.allocations) {
                 matchedPolicy = policy
                 matchedAllocation = alloc
+                // Bucket-based adaptive policies (thompson_bernoulli /
+                // epsilon_greedy / ucb1): the propensity is the chosen
+                // allocation's bucket-range share. Static policies omit it.
+                if policy.kind == .adaptive, bundle.hashing.bucketCount > 0 {
+                    matchedProbability = Double(alloc.bucketRange.end - alloc.bucketRange.start + 1)
+                        / Double(bundle.hashing.bucketCount)
+                }
                 matchedPolicies.append(policy)
                 if hasParams { applyOverrides(alloc.overrides, to: &assignments) }
                 break
@@ -246,6 +269,8 @@ func resolveInternal(
             allocationKey: matchedAllocation?.key,
             unitKey: layerUnitKey,
             unitKeyValue: layerUnitKey != nil ? layerUnitValue : nil,
+            probability: validProbability(matchedProbability),
+            modelVersion: matchedModelVersion,
             attributionOnly: !hasParams
         ))
     }
@@ -256,6 +281,15 @@ func resolveInternal(
         layers: layers,
         matchedPolicies: matchedPolicies
     )
+}
+
+/// The events schema constrains `probability` to (0, 1] (exclusiveMinimum 0,
+/// maximum 1). Anything outside that range — the degenerate zero-weight
+/// fallback of `weightedSelection`, a corrupt entity weight, or a bucket
+/// range wider than `bucketCount` — is omitted rather than clamped.
+private func validProbability(_ probability: Double?) -> Double? {
+    guard let p = probability, p > 0, p <= 1 else { return nil }
+    return p
 }
 
 private func applyOverrides(

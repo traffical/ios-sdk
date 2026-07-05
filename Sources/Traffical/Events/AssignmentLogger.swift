@@ -61,7 +61,11 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
                 type: type,
                 decisionId: decision.decisionId,
                 anonymousId: anonymousId,
-                id: TrafficalIDGenerator.assignmentId()
+                id: TrafficalIDGenerator.assignmentId(),
+                bucket: layer.bucket >= 0 ? layer.bucket : nil,
+                probability: layer.probability,
+                modelVersion: layer.modelVersion,
+                configVersion: decision.metadata.configVersion
             )
             logger(entry)
         }

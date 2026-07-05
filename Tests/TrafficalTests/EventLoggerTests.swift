@@ -86,6 +86,92 @@ final class EventLoggerTests: XCTestCase {
         await fulfillment(of: [flushExpectation], timeout: 2.0)
     }
 
+    // MARK: - Wire shape (sdk-spec events.schema.json)
+
+    func test_exposure_payload_carries_config_version_and_layer_propensity() async throws {
+        var capturedBody: Data?
+        MockURLProtocol.handler = { request in
+            capturedBody = request.httpBody
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+        let logger = makeLogger(batchSize: 50, intervalMs: 0)
+        let exposure = TrafficalExposureEvent(
+            base: makeBase(),
+            decisionId: "dec_1",
+            assignments: ["x": .string("t")],
+            layers: [
+                TrafficalLayerResolution(
+                    layerId: "L",
+                    bucket: 42,
+                    policyId: "p_ctx",
+                    allocationName: "treatment",
+                    probability: 0.25,
+                    modelVersion: "2026-07-02T12:00:00Z"
+                ),
+            ],
+            configVersion: "v42"
+        )
+        logger.log(.exposure(exposure))
+        try await logger.flush()
+
+        let events = try eventsFrom(capturedBody)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["type"] as? String, "exposure")
+        XCTAssertEqual(events[0]["configVersion"] as? String, "v42")
+        let layers = try XCTUnwrap(events[0]["layers"] as? [[String: Any]])
+        XCTAssertEqual(layers[0]["probability"] as? Double, 0.25)
+        XCTAssertEqual(layers[0]["modelVersion"] as? String, "2026-07-02T12:00:00Z")
+    }
+
+    func test_decision_payload_carries_config_version_and_omits_nil_fields() async throws {
+        var capturedBody: Data?
+        MockURLProtocol.handler = { request in
+            capturedBody = request.httpBody
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+        let logger = makeLogger(batchSize: 50, intervalMs: 0)
+        let decision = TrafficalDecisionEvent(
+            base: makeBase(),
+            assignments: ["x": .string("t")],
+            layers: [
+                // Static policy: probability/modelVersion stay nil and must be
+                // omitted from the wire payload entirely.
+                TrafficalLayerResolution(layerId: "L", bucket: 7, policyId: "p_static", allocationName: "control"),
+            ],
+            configVersion: "v42"
+        )
+        logger.log(.decision(decision))
+        try await logger.flush()
+
+        let events = try eventsFrom(capturedBody)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["type"] as? String, "decision")
+        XCTAssertEqual(events[0]["configVersion"] as? String, "v42")
+        let layers = try XCTUnwrap(events[0]["layers"] as? [[String: Any]])
+        XCTAssertNil(layers[0]["probability"])
+        XCTAssertNil(layers[0]["modelVersion"])
+    }
+
+    func test_config_version_omitted_when_nil() async throws {
+        var capturedBody: Data?
+        MockURLProtocol.handler = { request in
+            capturedBody = request.httpBody
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+        let logger = makeLogger(batchSize: 50, intervalMs: 0)
+        let exposure = TrafficalExposureEvent(
+            base: makeBase(),
+            decisionId: "dec_1",
+            assignments: [:],
+            layers: []
+        )
+        logger.log(.exposure(exposure))
+        try await logger.flush()
+
+        let events = try eventsFrom(capturedBody)
+        XCTAssertNil(events[0]["configVersion"])
+    }
+
     // MARK: - Helpers
 
     private func makeLogger(batchSize: Int, intervalMs: Int, lifecycle: LifecycleProvider? = nil) -> EventLogger {
@@ -105,18 +191,25 @@ final class EventLoggerTests: XCTestCase {
     }
 
     private func makeTrackEvent(_ name: String) -> TrafficalTrackEvent {
-        return TrafficalTrackEvent(
-            base: TrafficalBaseEvent(
-                id: TrafficalIDGenerator.trackEventId(),
-                orgId: "org",
-                projectId: "proj",
-                env: "prod",
-                unitKey: "user",
-                timestamp: TrafficalTime.now(),
-                sdkName: trafficalSDKName,
-                sdkVersion: trafficalSDKVersion
-            ),
-            event: name
+        return TrafficalTrackEvent(base: makeBase(), event: name)
+    }
+
+    private func makeBase() -> TrafficalBaseEvent {
+        return TrafficalBaseEvent(
+            id: TrafficalIDGenerator.trackEventId(),
+            orgId: "org",
+            projectId: "proj",
+            env: "prod",
+            unitKey: "user",
+            timestamp: TrafficalTime.now(),
+            sdkName: trafficalSDKName,
+            sdkVersion: trafficalSDKVersion
         )
+    }
+
+    private func eventsFrom(_ body: Data?) throws -> [[String: Any]] {
+        let payload = try XCTUnwrap(body)
+        let json = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        return try XCTUnwrap(json?["events"] as? [[String: Any]])
     }
 }

@@ -10,12 +10,15 @@ import Foundation
 ///   3. Look up weights — entity-specific, then global prior, then uniform.
 ///   4. Run deterministic weighted selection seeded by
 ///      `entityId:unitKeyValue:policyId`.
+///
+/// `probability` is the weight the SDK actually used for the chosen
+/// allocation — the propensity logged on exposure/decision events.
 public func resolvePerEntityPolicy(
     bundle: TrafficalConfigBundle,
     policy: BundlePolicy,
     context: TrafficalContext,
     unitKeyValue: String
-) -> (allocation: BundleAllocation, entityId: String)? {
+) -> (allocation: BundleAllocation, entityId: String, probability: Double)? {
     guard let entityConfig = policy.entityConfig else { return nil }
 
     // 1. Build entity ID.
@@ -58,8 +61,8 @@ public func resolvePerEntityPolicy(
     // 4. Deterministic weighted selection.
     let seed = "\(entityId):\(unitKeyValue):\(policy.id)"
     let index = weightedSelection(weights: weights, seed: seed)
-    guard index >= 0 && index < allocations.count else { return nil }
-    return (allocations[index], entityId)
+    guard index >= 0 && index < allocations.count, index < weights.count else { return nil }
+    return (allocations[index], entityId, weights[index])
 }
 
 /// Joins context values for the entity keys with `_`. Returns `nil` when any

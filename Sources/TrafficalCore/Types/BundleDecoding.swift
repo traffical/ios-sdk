@@ -162,7 +162,9 @@ public enum TrafficalBundleDecoder {
             gamma: gamma,
             actionProbabilityFloor: floor,
             defaultAllocationScore: defaultScore,
-            coefficients: coefficients
+            coefficients: coefficients,
+            generatedAt: dict["generatedAt"] as? String,
+            modelVersion: dict["modelVersion"] as? String
         )
     }
 

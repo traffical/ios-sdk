@@ -12,13 +12,16 @@ import Foundation
 ///   4. Seed the SHA-256 v2 hash with `"ctx:" + unitKeyValue + ":" + policyId`
 ///      and use `weightedSelection` to deterministically pick an allocation index.
 ///
+/// Returns the chosen allocation together with its floored-softmax probability
+/// (the propensity logged on exposure/decision events for off-policy training).
+///
 /// Returns `nil` when the policy has no `contextualModel` (graceful fall-through
 /// to bucket-based allocation) or no allocations to pick from.
 public func resolveContextualPolicy(
     policy: BundlePolicy,
     context: TrafficalContext,
     unitKeyValue: String
-) -> BundleAllocation? {
+) -> (allocation: BundleAllocation, probability: Double)? {
     guard let model = policy.contextualModel else { return nil }
     if policy.allocations.isEmpty { return nil }
 
@@ -45,7 +48,7 @@ public func resolveContextualPolicy(
     let seed = "ctx:\(unitKeyValue):\(policy.id)"
     let index = weightedSelection(weights: probabilities, seed: seed)
     guard index >= 0 && index < policy.allocations.count else { return nil }
-    return policy.allocations[index]
+    return (policy.allocations[index], probabilities[index])
 }
 
 /// Linear score for one allocation given the trained coefficients and the

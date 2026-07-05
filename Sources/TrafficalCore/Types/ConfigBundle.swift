@@ -206,17 +206,29 @@ public struct BundleContextualModel: Sendable, Equatable {
     public var actionProbabilityFloor: Double
     public var defaultAllocationScore: Double
     public var coefficients: [String: BundleAllocationCoefficients]
+    /// Timestamp of the training run that produced these coefficients
+    /// (`trainingSummary.generatedAt`). Optional — older bundles omit it; the
+    /// engine falls back to `modelVersion`, then the policy's `stateVersion`.
+    public var generatedAt: String?
+    /// Alias some bundles emit instead of `generatedAt`. Same semantics: the
+    /// timestamp of the model coefficients. `generatedAt` wins when both are
+    /// present.
+    public var modelVersion: String?
 
     public init(
         gamma: Double,
         actionProbabilityFloor: Double,
         defaultAllocationScore: Double,
-        coefficients: [String: BundleAllocationCoefficients]
+        coefficients: [String: BundleAllocationCoefficients],
+        generatedAt: String? = nil,
+        modelVersion: String? = nil
     ) {
         self.gamma = gamma
         self.actionProbabilityFloor = actionProbabilityFloor
         self.defaultAllocationScore = defaultAllocationScore
         self.coefficients = coefficients
+        self.generatedAt = generatedAt
+        self.modelVersion = modelVersion
     }
 }
 

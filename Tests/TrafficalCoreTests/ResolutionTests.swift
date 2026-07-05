@@ -197,6 +197,343 @@ final class ResolutionTests: XCTestCase {
         XCTAssertEqual(withParamsLayer?.attributionOnly, false)
     }
 
+    // MARK: - Propensity (layers[].probability / layers[].modelVersion)
+
+    func test_static_policy_layer_omits_probability() {
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_static",
+                        state: .running,
+                        kind: .static,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 999),
+                                             overrides: ["x": .string("t")]),
+                        ],
+                        conditions: []
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.policyId, "p_static")
+        XCTAssertNil(layer?.probability)
+        XCTAssertNil(layer?.modelVersion)
+    }
+
+    func test_adaptive_bucket_policy_probability_is_bucket_range_share() {
+        // 1000 buckets; the chosen allocation's share is (end - start + 1) / 1000.
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_bandit",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 249),
+                                             overrides: ["x": .string("control")]),
+                            BundleAllocation(id: "b", name: "treatment",
+                                             bucketRange: BundleBucketRange(start: 250, end: 999),
+                                             overrides: ["x": .string("treatment")]),
+                        ],
+                        conditions: [],
+                        stateVersion: "2026-07-01T00:00:00Z"
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        let expectedShare = layer?.allocationName == "control" ? 0.25 : 0.75
+        XCTAssertEqual(layer?.probability ?? -1, expectedShare, accuracy: 1e-9)
+        // modelVersion is reserved for linear_contextual policies.
+        XCTAssertNil(layer?.modelVersion)
+    }
+
+    func test_contextual_policy_layer_carries_probability_and_model_version() {
+        let model = BundleContextualModel(
+            gamma: 1.0,
+            actionProbabilityFloor: 0.1,
+            defaultAllocationScore: 0,
+            coefficients: [:],
+            generatedAt: "2026-07-02T12:00:00Z"
+        )
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_ctx",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 499),
+                                             overrides: ["x": .string("control")]),
+                            BundleAllocation(id: "b", name: "treatment",
+                                             bucketRange: BundleBucketRange(start: 500, end: 999),
+                                             overrides: ["x": .string("treatment")]),
+                        ],
+                        conditions: [],
+                        stateVersion: "2026-06-30T00:00:00Z",
+                        contextualModel: model
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.policyId, "p_ctx")
+        // No trained coefficients -> uniform softmax over two allocations.
+        XCTAssertEqual(layer?.probability ?? -1, 0.5, accuracy: 1e-9)
+        // generatedAt wins over stateVersion when the model ships one.
+        XCTAssertEqual(layer?.modelVersion, "2026-07-02T12:00:00Z")
+    }
+
+    func test_contextual_model_version_prefers_generated_at_over_alias() {
+        let model = BundleContextualModel(
+            gamma: 1.0,
+            actionProbabilityFloor: 0.1,
+            defaultAllocationScore: 0,
+            coefficients: [:],
+            generatedAt: "2026-07-02T12:00:00Z",
+            modelVersion: "2026-07-01T00:00:00Z"
+        )
+        let decision = decide(
+            bundle: makeContextualBundle(model: model, stateVersion: "2026-06-30T00:00:00Z"),
+            context: ["userId": .string("u")],
+            defaults: ["x": .string("c")]
+        )
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.modelVersion, "2026-07-02T12:00:00Z")
+    }
+
+    func test_contextual_model_version_falls_back_to_alias_when_no_generated_at() {
+        let model = BundleContextualModel(
+            gamma: 1.0,
+            actionProbabilityFloor: 0.1,
+            defaultAllocationScore: 0,
+            coefficients: [:],
+            modelVersion: "2026-07-01T00:00:00Z"
+        )
+        let decision = decide(
+            bundle: makeContextualBundle(model: model, stateVersion: "2026-06-30T00:00:00Z"),
+            context: ["userId": .string("u")],
+            defaults: ["x": .string("c")]
+        )
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.modelVersion, "2026-07-01T00:00:00Z")
+    }
+
+    private func makeContextualBundle(model: BundleContextualModel, stateVersion: String?) -> TrafficalConfigBundle {
+        makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_ctx",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 999),
+                                             overrides: ["x": .string("control")]),
+                        ],
+                        conditions: [],
+                        stateVersion: stateVersion,
+                        contextualModel: model
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+    }
+
+    func test_contextual_model_version_falls_back_to_state_version() {
+        let model = BundleContextualModel(
+            gamma: 1.0,
+            actionProbabilityFloor: 0.1,
+            defaultAllocationScore: 0,
+            coefficients: [:]
+        )
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_ctx",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 999),
+                                             overrides: ["x": .string("control")]),
+                        ],
+                        conditions: [],
+                        stateVersion: "2026-06-30T00:00:00Z",
+                        contextualModel: model
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.modelVersion, "2026-06-30T00:00:00Z")
+    }
+
+    func test_per_entity_bundle_policy_probability_is_weight_used() {
+        let policy = BundlePolicy(
+            id: "p_entity",
+            state: .running,
+            kind: .adaptive,
+            allocations: [
+                BundleAllocation(id: "a", name: "variant_a",
+                                 bucketRange: BundleBucketRange(start: 0, end: 499),
+                                 overrides: ["x": .string("a")]),
+                BundleAllocation(id: "b", name: "variant_b",
+                                 bucketRange: BundleBucketRange(start: 500, end: 999),
+                                 overrides: ["x": .string("b")]),
+            ],
+            conditions: [],
+            entityConfig: BundleEntityConfig(entityKeys: ["productId"], resolutionMode: .bundle)
+        )
+        let bundle = TrafficalConfigBundle(
+            version: "2026-05-21T00:00:00Z",
+            orgId: "org_test",
+            projectId: "proj_test",
+            env: "production",
+            hashing: BundleHashingConfig(unitKey: "userId", bucketCount: 1000),
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ],
+            layers: [BundleLayer(id: "L", policies: [policy])],
+            entityState: [
+                "p_entity": BundleEntityPolicyState(
+                    global: EntityWeights(entityId: "_global", weights: [0.5, 0.5], computedAt: ""),
+                    entities: [
+                        "prod-42": EntityWeights(entityId: "prod-42", weights: [0.7, 0.3], computedAt: ""),
+                    ]
+                ),
+            ]
+        )
+        let decision = decide(
+            bundle: bundle,
+            context: ["userId": .string("u"), "productId": .string("prod-42")],
+            defaults: ["x": .string("c")]
+        )
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.policyId, "p_entity")
+        let expected = layer?.allocationName == "variant_a" ? 0.7 : 0.3
+        XCTAssertEqual(layer?.probability ?? -1, expected, accuracy: 1e-9)
+    }
+
+    func test_per_entity_zero_weight_selection_omits_probability() {
+        // All-zero entity weights: weightedSelection falls through to the last
+        // index with weight 0. The events schema requires probability in
+        // (0, 1], so the layer must omit it rather than emit 0.
+        let policy = BundlePolicy(
+            id: "p_entity",
+            state: .running,
+            kind: .adaptive,
+            allocations: [
+                BundleAllocation(id: "a", name: "variant_a",
+                                 bucketRange: BundleBucketRange(start: 0, end: 499),
+                                 overrides: ["x": .string("a")]),
+                BundleAllocation(id: "b", name: "variant_b",
+                                 bucketRange: BundleBucketRange(start: 500, end: 999),
+                                 overrides: ["x": .string("b")]),
+            ],
+            conditions: [],
+            entityConfig: BundleEntityConfig(entityKeys: ["productId"], resolutionMode: .bundle)
+        )
+        let bundle = TrafficalConfigBundle(
+            version: "2026-05-21T00:00:00Z",
+            orgId: "org_test",
+            projectId: "proj_test",
+            env: "production",
+            hashing: BundleHashingConfig(unitKey: "userId", bucketCount: 1000),
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ],
+            layers: [BundleLayer(id: "L", policies: [policy])],
+            entityState: [
+                "p_entity": BundleEntityPolicyState(
+                    global: EntityWeights(entityId: "_global", weights: [0, 0], computedAt: ""),
+                    entities: [
+                        "prod-42": EntityWeights(entityId: "prod-42", weights: [0, 0], computedAt: ""),
+                    ]
+                ),
+            ]
+        )
+        let decision = decide(
+            bundle: bundle,
+            context: ["userId": .string("u"), "productId": .string("prod-42")],
+            defaults: ["x": .string("c")]
+        )
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.policyId, "p_entity")
+        XCTAssertNil(layer?.probability)
+    }
+
+    func test_adaptive_bucket_share_above_one_omits_probability() {
+        // A misconfigured allocation spanning more buckets than the layer has
+        // would yield a share > 1 — outside the schema's (0, 1] — so the
+        // layer must omit the probability instead of emitting it raw.
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_bandit",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 1999),
+                                             overrides: ["x": .string("control")]),
+                        ],
+                        conditions: []
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.policyId, "p_bandit")
+        XCTAssertNil(layer?.probability)
+    }
+
+    // MARK: - configVersion
+
+    func test_decide_records_config_version_from_bundle() {
+        let bundle = makeBundle(layers: [], parameters: [])
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        XCTAssertEqual(decision.metadata.configVersion, "2026-05-21T00:00:00Z")
+    }
+
+    func test_decide_config_version_nil_without_bundle() {
+        let decision = decide(bundle: nil, context: [:], defaults: ["x": .string("c")])
+        XCTAssertNil(decision.metadata.configVersion)
+    }
+
     func test_decision_has_id_and_timestamp() {
         let bundle = makeBundle(layers: [], parameters: [])
         let decision = decide(
@@ -361,5 +698,79 @@ final class ResolutionTests: XCTestCase {
         let bundle = try TrafficalBundleDecoder.decode(json)
         XCTAssertNil(bundle.layers[0].unitKey)
         XCTAssertEqual(bundle.layers[1].unitKey, "merchantId")
+    }
+
+    func test_bundle_decoding_reads_contextual_model_generated_at() throws {
+        let json: [String: Any] = [
+            "version": "2024-01-01T00:00:00.000Z",
+            "orgId": "org_test",
+            "projectId": "proj_test",
+            "env": "production",
+            "hashing": ["unitKey": "userId", "bucketCount": 1000],
+            "parameters": [],
+            "layers": [
+                [
+                    "id": "L1",
+                    "policies": [
+                        [
+                            "id": "p_ctx",
+                            "state": "running",
+                            "kind": "adaptive",
+                            "allocations": [
+                                ["name": "control", "bucketRange": [0, 999], "overrides": [:]],
+                            ],
+                            "conditions": [],
+                            "contextualModel": [
+                                "gamma": 1.0,
+                                "actionProbabilityFloor": 0.05,
+                                "defaultAllocationScore": 0,
+                                "coefficients": [:],
+                                "generatedAt": "2026-07-02T12:00:00Z",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+        let bundle = try TrafficalBundleDecoder.decode(json)
+        XCTAssertEqual(bundle.layers[0].policies[0].contextualModel?.generatedAt, "2026-07-02T12:00:00Z")
+    }
+
+    func test_bundle_decoding_reads_contextual_model_version_alias() throws {
+        let json: [String: Any] = [
+            "version": "2024-01-01T00:00:00.000Z",
+            "orgId": "org_test",
+            "projectId": "proj_test",
+            "env": "production",
+            "hashing": ["unitKey": "userId", "bucketCount": 1000],
+            "parameters": [],
+            "layers": [
+                [
+                    "id": "L1",
+                    "policies": [
+                        [
+                            "id": "p_ctx",
+                            "state": "running",
+                            "kind": "adaptive",
+                            "allocations": [
+                                ["name": "control", "bucketRange": [0, 999], "overrides": [:]],
+                            ],
+                            "conditions": [],
+                            "contextualModel": [
+                                "gamma": 1.0,
+                                "actionProbabilityFloor": 0.05,
+                                "defaultAllocationScore": 0,
+                                "coefficients": [:],
+                                "modelVersion": "2026-07-01T00:00:00Z",
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+        let bundle = try TrafficalBundleDecoder.decode(json)
+        let model = bundle.layers[0].policies[0].contextualModel
+        XCTAssertNil(model?.generatedAt)
+        XCTAssertEqual(model?.modelVersion, "2026-07-01T00:00:00Z")
     }
 }

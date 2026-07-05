@@ -63,6 +63,36 @@ final class PerEntityTests: XCTestCase {
         XCTAssertTrue(["variant_a", "variant_b"].contains(result?.allocation.name ?? ""))
     }
 
+    func test_resolve_per_entity_returns_weight_actually_used_as_probability() throws {
+        let bundle = makeBundle()
+        let policy = bundle.layers[0].policies[0]
+        let context: TrafficalContext = [
+            "userId": .string("user-abc"),
+            "productId": .string("prod-42"),
+        ]
+        let result = try XCTUnwrap(
+            resolvePerEntityPolicy(bundle: bundle, policy: policy, context: context, unitKeyValue: "user-abc")
+        )
+        // Entity prod-42 has weights [0.7, 0.3]; the propensity must be the
+        // weight of the allocation the deterministic selection landed on.
+        let expected = result.allocation.name == "variant_a" ? 0.7 : 0.3
+        XCTAssertEqual(result.probability, expected, accuracy: 1e-9)
+    }
+
+    func test_resolve_per_entity_uniform_probability_when_state_missing() throws {
+        let bundle = makeBundle()
+        var policy = bundle.layers[0].policies[0]
+        policy.id = "policy_missing" // no entityState for this id -> uniform
+        let context: TrafficalContext = [
+            "userId": .string("user-abc"),
+            "productId": .string("prod-42"),
+        ]
+        let result = try XCTUnwrap(
+            resolvePerEntityPolicy(bundle: bundle, policy: policy, context: context, unitKeyValue: "user-abc")
+        )
+        XCTAssertEqual(result.probability, 0.5, accuracy: 1e-9)
+    }
+
     func test_resolve_per_entity_returns_nil_for_missing_entity_key() {
         let bundle = makeBundle()
         let policy = bundle.layers[0].policies[0]

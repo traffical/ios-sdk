@@ -61,6 +61,29 @@ final class AssignmentLoggerTests: XCTestCase {
         }
     }
 
+    func test_entries_pass_through_bucket_propensity_model_and_config_version() {
+        let captured = Box([TrafficalAssignmentLogEntry]())
+        let emitter = AssignmentLogEmitter(orgId: "org", projectId: "proj", env: "prod") {
+            captured.value.append($0)
+        }
+        emitter.emit(decision: makeDecision(), type: .decision)
+        XCTAssertEqual(captured.value.count, 2)
+
+        let contextual = captured.value.first(where: { $0.policyId == "p1" })
+        XCTAssertEqual(contextual?.bucket, 100)
+        XCTAssertEqual(contextual?.probability ?? -1, 0.42, accuracy: 1e-9)
+        XCTAssertEqual(contextual?.modelVersion, "2026-07-02T12:00:00Z")
+        XCTAssertEqual(contextual?.configVersion, "2026-05-21T00:00:00Z")
+
+        // Static-policy layer: no propensity, no model version — the fields
+        // stay nil so warehouse rows omit them.
+        let staticLayer = captured.value.first(where: { $0.policyId == "p2" })
+        XCTAssertEqual(staticLayer?.bucket, 200)
+        XCTAssertNil(staticLayer?.probability)
+        XCTAssertNil(staticLayer?.modelVersion)
+        XCTAssertEqual(staticLayer?.configVersion, "2026-05-21T00:00:00Z")
+    }
+
     func test_dedup_disabled_emits_every_time() {
         let captured = Box([TrafficalAssignmentLogEntry]())
         let emitter = AssignmentLogEmitter(
@@ -82,13 +105,15 @@ final class AssignmentLoggerTests: XCTestCase {
                 layers: [
                     TrafficalLayerResolution(
                         layerId: "l1", bucket: 100,
-                        policyId: "p1", allocationId: "a1", allocationName: "control"
+                        policyId: "p1", allocationId: "a1", allocationName: "control",
+                        probability: 0.42, modelVersion: "2026-07-02T12:00:00Z"
                     ),
                     TrafficalLayerResolution(
                         layerId: "l2", bucket: 200,
                         policyId: "p2", allocationId: "a2", allocationName: "treatment"
                     ),
-                ]
+                ],
+                configVersion: "2026-05-21T00:00:00Z"
             )
         )
     }

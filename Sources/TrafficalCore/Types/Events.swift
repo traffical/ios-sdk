@@ -40,17 +40,21 @@ public struct TrafficalExposureEvent: Sendable {
     public var decisionId: String
     public var assignments: [String: TrafficalParameterValue]
     public var layers: [TrafficalLayerResolution]
+    /// The config bundle `version` the SDK evaluated against.
+    public var configVersion: String?
 
     public init(
         base: TrafficalBaseEvent,
         decisionId: String,
         assignments: [String: TrafficalParameterValue],
-        layers: [TrafficalLayerResolution]
+        layers: [TrafficalLayerResolution],
+        configVersion: String? = nil
     ) {
         self.base = base
         self.decisionId = decisionId
         self.assignments = assignments
         self.layers = layers
+        self.configVersion = configVersion
     }
 }
 
@@ -102,19 +106,23 @@ public struct TrafficalDecisionEvent: Sendable {
     public var assignments: [String: TrafficalParameterValue]
     public var layers: [TrafficalLayerResolution]
     public var latencyMs: Double?
+    /// The config bundle `version` the SDK evaluated against.
+    public var configVersion: String?
 
     public init(
         base: TrafficalBaseEvent,
         requestedParameters: [String]? = nil,
         assignments: [String: TrafficalParameterValue],
         layers: [TrafficalLayerResolution],
-        latencyMs: Double? = nil
+        latencyMs: Double? = nil,
+        configVersion: String? = nil
     ) {
         self.base = base
         self.requestedParameters = requestedParameters
         self.assignments = assignments
         self.layers = layers
         self.latencyMs = latencyMs
+        self.configVersion = configVersion
     }
 }
 
@@ -149,6 +157,20 @@ public struct TrafficalAssignmentLogEntry: Sendable {
     public var anonymousId: String?
     /// Unique id for this assignment log entry.
     public var id: String?
+    /// Hash bucket of the layer's unit at decision time. `nil` when the
+    /// layer was skipped (bucket -1). Warehouse row key: `bucket`.
+    public var bucket: Int?
+    /// Propensity of the chosen allocation at decision time, in (0, 1].
+    /// Adaptive policies only; `nil` for static policies. Warehouse row key:
+    /// `propensity`.
+    public var probability: Double?
+    /// linear_contextual only: model timestamp of the coefficients used at
+    /// decision time. Warehouse row key: `model_version`.
+    public var modelVersion: String?
+    /// The config bundle `version` the SDK evaluated against (server mode:
+    /// the resolve response's `stateVersion`). Warehouse row key:
+    /// `config_version`.
+    public var configVersion: String?
 
     public init(
         unitKey: String,
@@ -168,7 +190,11 @@ public struct TrafficalAssignmentLogEntry: Sendable {
         type: TrafficalAssignmentType,
         decisionId: String? = nil,
         anonymousId: String? = nil,
-        id: String? = nil
+        id: String? = nil,
+        bucket: Int? = nil,
+        probability: Double? = nil,
+        modelVersion: String? = nil,
+        configVersion: String? = nil
     ) {
         self.unitKey = unitKey
         self.policyId = policyId
@@ -188,5 +214,9 @@ public struct TrafficalAssignmentLogEntry: Sendable {
         self.decisionId = decisionId
         self.anonymousId = anonymousId
         self.id = id
+        self.bucket = bucket
+        self.probability = probability
+        self.modelVersion = modelVersion
+        self.configVersion = configVersion
     }
 }

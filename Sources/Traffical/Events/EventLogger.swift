@@ -18,6 +18,7 @@ public enum TrafficalQueuedEvent: Sendable {
             payload["decisionId"] = event.decisionId
             payload["assignments"] = assignmentsToAny(event.assignments)
             payload["layers"] = event.layers.map(layerToAny)
+            if let configVersion = event.configVersion { payload["configVersion"] = configVersion }
             return payload
         case .track(let event):
             var payload = baseFields(event.base)
@@ -46,6 +47,7 @@ public enum TrafficalQueuedEvent: Sendable {
             payload["assignments"] = assignmentsToAny(event.assignments)
             payload["layers"] = event.layers.map(layerToAny)
             if let ms = event.latencyMs { payload["latencyMs"] = ms }
+            if let configVersion = event.configVersion { payload["configVersion"] = configVersion }
             return payload
         }
     }
@@ -85,6 +87,8 @@ private func layerToAny(_ layer: TrafficalLayerResolution) -> [String: Any] {
     if let allocationKey = layer.allocationKey { out["allocationKey"] = allocationKey }
     if let unitKey = layer.unitKey { out["unitKey"] = unitKey }
     if let unitKeyValue = layer.unitKeyValue { out["unitKeyValue"] = unitKeyValue }
+    if let probability = layer.probability { out["probability"] = probability }
+    if let modelVersion = layer.modelVersion { out["modelVersion"] = modelVersion }
     return out
 }
 

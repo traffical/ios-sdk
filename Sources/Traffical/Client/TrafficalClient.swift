@@ -239,7 +239,8 @@ public final class TrafficalClient: @unchecked Sendable {
                 base: makeBase(unitKey: unitKey, context: decision.metadata.filteredContext),
                 decisionId: decision.decisionId,
                 assignments: decision.assignments,
-                layers: decision.metadata.layers
+                layers: decision.metadata.layers,
+                configVersion: decision.metadata.configVersion
             )
             eventLogger.log(.exposure(event))
         }
@@ -426,7 +427,8 @@ public final class TrafficalClient: @unchecked Sendable {
                 base: makeBase(unitKey: final.metadata.unitKeyValue, context: final.metadata.filteredContext),
                 requestedParameters: Array(defaults.keys),
                 assignments: final.assignments,
-                layers: final.metadata.layers
+                layers: final.metadata.layers,
+                configVersion: final.metadata.configVersion
             )
             eventLogger.log(.decision(event))
         }
@@ -456,10 +458,14 @@ public final class TrafficalClient: @unchecked Sendable {
         for (key, value) in response.assignments where assignments[key] != nil {
             assignments[key] = value
         }
+        // Server mode: the version "evaluated against" is the resolve
+        // response's stateVersion (mirrors `getConfigVersion()` in the JS SDK).
+        var metadata = response.metadata
+        if metadata.configVersion == nil { metadata.configVersion = response.stateVersion }
         return TrafficalDecisionResult(
             decisionId: response.decisionId,
             assignments: assignments,
-            metadata: response.metadata
+            metadata: metadata
         )
     }
 
@@ -538,10 +544,12 @@ private func serialize(bundle: TrafficalConfigBundle) -> [String: Any] {
             ]
         },
         "layers": bundle.layers.map { layer -> [String: Any] in
-            [
+            var l: [String: Any] = [
                 "id": layer.id,
                 "policies": layer.policies.map(serialize(policy:)),
             ]
+            if let unitKey = layer.unitKey { l["unitKey"] = unitKey }
+            return l
         },
     ]
     if let state = bundle.entityState {
@@ -585,6 +593,44 @@ private func serialize(policy: BundlePolicy) -> [String: Any] {
     if let range = policy.eligibleBucketRange {
         dict["eligibleBucketRange"] = ["start": range.start, "end": range.end]
     }
+    if let stateVersion = policy.stateVersion { dict["stateVersion"] = stateVersion }
+    if let logging = policy.contextLogging {
+        dict["contextLogging"] = ["allowedFields": logging.allowedFields]
+    }
+    if let model = policy.contextualModel {
+        dict["contextualModel"] = serialize(contextualModel: model)
+    }
+    if let entityConfig = policy.entityConfig {
+        var e: [String: Any] = [
+            "entityKeys": entityConfig.entityKeys,
+            "resolutionMode": entityConfig.resolutionMode.rawValue,
+        ]
+        if let timeout = entityConfig.edgeTimeoutMs { e["edgeTimeoutMs"] = timeout }
+        if let dynamic = entityConfig.dynamicAllocations {
+            e["dynamicAllocations"] = ["countKey": dynamic.countKey]
+        }
+        dict["entityConfig"] = e
+    }
+    return dict
+}
+
+private func serialize(contextualModel model: BundleContextualModel) -> [String: Any] {
+    var dict: [String: Any] = [
+        "gamma": model.gamma,
+        "actionProbabilityFloor": model.actionProbabilityFloor,
+        "defaultAllocationScore": model.defaultAllocationScore,
+        "coefficients": model.coefficients.reduce(into: [String: Any]()) { acc, kv in
+            acc[kv.key] = [
+                "intercept": kv.value.intercept,
+                "numeric": kv.value.numeric.map { ["key": $0.key, "coef": $0.coef, "missing": $0.missing] },
+                "categorical": kv.value.categorical.map {
+                    ["key": $0.key, "values": $0.values, "missing": $0.missing]
+                },
+            ]
+        },
+    ]
+    if let generatedAt = model.generatedAt { dict["generatedAt"] = generatedAt }
+    if let modelVersion = model.modelVersion { dict["modelVersion"] = modelVersion }
     return dict
 }
 
@@ -611,6 +657,8 @@ private func serialize(serverResponse response: ServerResolveResponse) -> [Strin
                 ]
                 if let p = layer.policyId { dict["policyId"] = p }
                 if let n = layer.allocationName { dict["allocationName"] = n }
+                if let prob = layer.probability { dict["probability"] = prob }
+                if let mv = layer.modelVersion { dict["modelVersion"] = mv }
                 return dict
             },
         ],
