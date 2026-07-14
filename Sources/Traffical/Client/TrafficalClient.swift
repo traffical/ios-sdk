@@ -21,13 +21,25 @@ public final class TrafficalClient: @unchecked Sendable {
     private let lifecycleProvider: LifecycleProvider
     private let eventLogger: EventLogger
     private let errorBoundary: ErrorBoundary
-    private let exposureDedup: ExposureDeduplicator
+    /// Session exposure dedup. `internal` (not `private`) only so conformance
+    /// tests can pre-seed the `alreadyExposed` state from the shared vectors.
+    let exposureDedup: ExposureDeduplicator
     private let attributionMap = AttributionMap()
     private let assignmentEmitter: AssignmentLogEmitter?
 
     private let stateLock = NSLock()
     private var currentBundle: TrafficalConfigBundle?
+    /// Last-good server resolve. Backs the debug accessors and serves as the
+    /// cold-start / cache-miss fallback for `decideFromServerCache`.
     private var serverResponse: ServerResolveResponse?
+    /// Server-mode per-call context cache, keyed by a canonical hash of the
+    /// enriched context (mirrors php-sdk `Client::$serverCache`). Each
+    /// `decide()` / `getParams()` resolves against the context actually passed,
+    /// not a single init-time snapshot resolved with an empty context.
+    private var serverResponsesByContext: [String: ServerResolveResponse] = [:]
+    /// Context keys with a background `/v1/resolve` already in flight, so
+    /// repeated identical contexts don't stampede the edge.
+    private var inFlightResolveKeys: Set<String> = []
     private var cachedEdgeOptions: ResolveOptions?
     private var etag: String?
     private var overrides: [String: TrafficalParameterValue] = [:]
@@ -197,6 +209,12 @@ public final class TrafficalClient: @unchecked Sendable {
         attributionMap.clearAll()
         switch options.evaluationMode {
         case .server:
+            // The stable id (part of the unit key) changed, so every cached
+            // per-context resolve is now stale — drop them and re-resolve.
+            stateLock.lock()
+            serverResponsesByContext.removeAll()
+            inFlightResolveKeys.removeAll()
+            stateLock.unlock()
             Task { try? await self.refreshServer() }
         case .bundle:
             // The stable id changed, so any prefetched edge results are stale —
@@ -398,6 +416,19 @@ public final class TrafficalClient: @unchecked Sendable {
         do {
             let result = try await configFetcher.fetch(etag: current)
             if let bundle = result.bundle {
+                // S8: validate a freshly-fetched bundle before it can replace a
+                // known-good one. A bundle with a zero/negative bucketCount or an
+                // empty unit key would make every hash degenerate — discard it
+                // and keep the last-good cached bundle rather than crash or serve
+                // garbage. (A structurally-undecodable bundle already fails open
+                // via the ConfigFetcher decode error path.)
+                guard bundle.hashing.bucketCount >= 1, !bundle.hashing.unitKey.isEmpty else {
+                    logConfig(.error, "config bundle malformed; keeping last-good", details: [
+                        "bucketCount": String(bundle.hashing.bucketCount),
+                        "unitKey": bundle.hashing.unitKey.isEmpty ? "<empty>" : bundle.hashing.unitKey,
+                    ])
+                    return
+                }
                 // Persist + swap in.
                 if let raw = try? JSONSerialization.data(withJSONObject: serialize(bundle: bundle)) {
                     bundleCache.write(raw)
@@ -434,23 +465,61 @@ public final class TrafficalClient: @unchecked Sendable {
 
     private func refreshServer() async throws {
         logConfig(.info, "server resolve: fetching")
+        let context = enrichContext([:])
         do {
-            let response = try await decisionClient.resolve(context: enrichContext([:]))
-            stateLock.lock()
-            serverResponse = response
-            lastSuccessfulRefresh = Date()
-            if let s = response.suggestedRefreshMs { suggestedRefreshMs = Int(s) }
-            stateLock.unlock()
-            if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
-                serverCache.write(data)
-            }
-            logConfig(.info, "server resolve succeeded", details: [
-                "decisionId": response.decisionId,
-                "assignments": String(response.assignments.count),
-            ])
+            _ = try await resolveAndCache(context: context, key: contextCacheKey(context))
         } catch {
             logConfig(.error, "server resolve failed: \(error)", details: ["error": "\(error)"])
             throw error
+        }
+    }
+
+    /// Resolves an (already-enriched) context on the edge and stores the
+    /// response both in the per-context cache and as the last-good snapshot.
+    @discardableResult
+    private func resolveAndCache(context: TrafficalContext, key: String) async throws -> ServerResolveResponse {
+        let response = try await decisionClient.resolve(context: context)
+        stateLock.lock()
+        serverResponsesByContext[key] = response
+        serverResponse = response
+        lastSuccessfulRefresh = Date()
+        if let s = response.suggestedRefreshMs { suggestedRefreshMs = Int(s) }
+        stateLock.unlock()
+        if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
+            serverCache.write(data)
+        }
+        logConfig(.info, "server resolve succeeded", details: [
+            "decisionId": response.decisionId,
+            "assignments": String(response.assignments.count),
+        ])
+        return response
+    }
+
+    /// Kicks off a background `/v1/resolve` for `context` if one is not already
+    /// in flight for the same key. `decide()` / `getParams()` are synchronous
+    /// and cannot await the network, so the cache converges to the contexts
+    /// actually being evaluated while the current call degrades to the last-good
+    /// snapshot (mirrors js-client `_maybeResolveForContext`).
+    private func scheduleServerResolve(context: TrafficalContext, key: String) {
+        stateLock.lock()
+        if inFlightResolveKeys.contains(key) {
+            stateLock.unlock()
+            return
+        }
+        inFlightResolveKeys.insert(key)
+        stateLock.unlock()
+        Task { [weak self] in
+            guard let self = self else { return }
+            defer {
+                self.stateLock.lock()
+                self.inFlightResolveKeys.remove(key)
+                self.stateLock.unlock()
+            }
+            do {
+                _ = try await self.resolveAndCache(context: context, key: key)
+            } catch {
+                self.logConfig(.error, "server resolve (per-context) failed: \(error)", details: ["error": "\(error)"])
+            }
         }
     }
 
@@ -541,10 +610,21 @@ public final class TrafficalClient: @unchecked Sendable {
         defaults: [String: TrafficalParameterValue],
         context: TrafficalContext
     ) -> TrafficalDecisionResult {
+        // `context` is already enriched by `computeDecision`. Look up the
+        // resolve response for THIS context, not a single init-time snapshot.
+        let key = contextCacheKey(context)
         stateLock.lock()
-        let response = serverResponse
+        let perContext = serverResponsesByContext[key]
+        let fallback = serverResponse
         stateLock.unlock()
-        guard let response = response else {
+
+        // On a per-context miss, converge the cache in the background so the
+        // next decide() with this context resolves against the edge.
+        if perContext == nil {
+            scheduleServerResolve(context: context, key: key)
+        }
+
+        guard let response = perContext ?? fallback else {
             return TrafficalDecisionResult(
                 decisionId: TrafficalIDGenerator.decisionId(),
                 assignments: defaults,
@@ -564,10 +644,26 @@ public final class TrafficalClient: @unchecked Sendable {
         var metadata = response.metadata
         if metadata.configVersion == nil { metadata.configVersion = response.stateVersion }
         return TrafficalDecisionResult(
-            decisionId: response.decisionId,
+            // Fresh decisionId per call — never reuse the resolve response's
+            // decisionId across decisions (spec 0.7.0 S8).
+            decisionId: TrafficalIDGenerator.decisionId(),
             assignments: assignments,
             metadata: metadata
         )
+    }
+
+    /// Canonical, order-independent cache key for a resolved context. Mirrors
+    /// php-sdk's `md5(json_encode($context))` — sorted keys so equivalent
+    /// contexts collapse to one edge round-trip and one cache slot.
+    private func contextCacheKey(_ context: TrafficalContext) -> String {
+        let any = contextToAny(context)
+        if JSONSerialization.isValidJSONObject(any),
+           let data = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+        // Fall back to a stable textual form if the context isn't JSON-encodable.
+        return context.keys.sorted().map { "\($0)=\(context[$0]!.asAny)" }.joined(separator: "&")
     }
 
     /// Prefetches edge-mode per-entity results so bundle-mode `decide()` can

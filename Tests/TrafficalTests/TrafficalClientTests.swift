@@ -304,6 +304,108 @@ final class TrafficalClientTests: XCTestCase {
     }
     """
 
+    // S8: server mode must resolve against the PER-CALL context, not a single
+    // init-time snapshot resolved with an empty context. Two different contexts
+    // yield independently-resolved assignments (mirrors php-sdk per-context
+    // serverCache). decisionId is fresh per call — never the resolve response's.
+    func test_server_mode_resolves_per_call_context_independently() async throws {
+        MockURLProtocol.handler = { request in
+            let body = request.httpBody ?? Data()
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let ctx = (json?["context"] as? [String: Any]) ?? [:]
+            let plan = (ctx["plan"] as? String) ?? "none"
+            let color = plan == "pro" ? "#PRO" : "#FREE"
+            let respBody = """
+            {
+              "decisionId": "dec_\(plan)",
+              "assignments": { "ui.color": "\(color)" },
+              "metadata": { "timestamp": "2026-05-21T00:00:00Z", "unitKeyValue": "u", "layers": [] }
+            }
+            """
+            return .init(statusCode: 200, headers: [:], body: Data(respBody.utf8))
+        }
+
+        let client = makeClient(mode: .server)
+        let pro: TrafficalContext = ["plan": .string("pro")]
+        let free: TrafficalContext = ["plan": .string("free")]
+
+        // decide()/getParams() are synchronous; a cache miss kicks off a
+        // background resolve for that exact context. Prime both, then wait for
+        // each context to converge independently.
+        _ = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        _ = client.decide(context: free, defaults: ["ui.color": .string("#FFF")])
+
+        try await pollUntil(timeout: 3.0) {
+            client.string("ui.color", default: "#FFF", context: pro) == "#PRO"
+                && client.string("ui.color", default: "#FFF", context: free) == "#FREE"
+        }
+
+        XCTAssertEqual(client.string("ui.color", default: "#FFF", context: pro), "#PRO")
+        XCTAssertEqual(client.string("ui.color", default: "#FFF", context: free), "#FREE")
+
+        // Fresh decisionId per call — the resolve response's "dec_pro" is never reused.
+        let d1 = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        let d2 = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        XCTAssertNotEqual(d1.decisionId, d2.decisionId, "decisionId must be fresh per call")
+        XCTAssertNotEqual(d1.decisionId, "dec_pro", "must not reuse the resolve response decisionId")
+    }
+
+    // S8: a freshly-fetched bundle that is malformed (bucketCount < 1 or an
+    // empty unit key) must be DISCARDED — the SDK keeps the last-good bundle,
+    // does not replace it, and does not crash.
+    func test_malformed_bundle_is_discarded_keeping_last_good() async throws {
+        MockURLProtocol.handler = { _ in
+            .init(statusCode: 200, headers: ["ETag": "\"bad\""], body: Data(self.malformedBundleJSON.utf8))
+        }
+        // Seeded with a known-good local bundle (version "v").
+        let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
+        XCTAssertEqual(client.configVersion, "v")
+
+        await client.initialize() // fetch returns the malformed bundle
+
+        // Last-good bundle survives: version unchanged and resolution still works.
+        XCTAssertEqual(client.configVersion, "v", "malformed bundle must not replace last-good")
+        XCTAssertTrue(client.bundleLoaded)
+        let color = client.string("ui.color", default: "#FFF")
+        XCTAssertTrue(["#0000FF", "#FF0000"].contains(color), "still resolves from last-good bundle: \(color)")
+    }
+
+    /// Same shape as `sampleBundleJSON` but with an empty `hashing.unitKey`
+    /// (decodes cleanly, so it exercises the ingestion-time validation guard
+    /// rather than the decoder's missing-field path).
+    private let malformedBundleJSON = """
+    {
+      "version": "v-malformed",
+      "orgId": "org", "projectId": "proj", "env": "prod",
+      "hashing": { "unitKey": "", "bucketCount": 1000 },
+      "parameters": [
+        { "key": "ui.color", "type": "string", "default": "#000000", "layerId": "layer_ui", "namespace": "ui" }
+      ],
+      "layers": [{
+        "id": "layer_ui",
+        "policies": [{
+          "id": "policy_ab", "state": "running", "kind": "static",
+          "allocations": [
+            { "name": "control", "bucketRange": [0, 499], "overrides": { "ui.color": "#0000FF" } },
+            { "name": "treatment", "bucketRange": [500, 999], "overrides": { "ui.color": "#FF0000" } }
+          ],
+          "conditions": []
+        }]
+      }]
+    }
+    """
+
+    /// Polls `condition` until it returns true or the timeout elapses. Used to
+    /// await background server-mode resolves that `decide()` cannot itself await.
+    private func pollUntil(timeout: TimeInterval, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(condition(), "condition not met within \(timeout)s")
+    }
+
     // MARK: - Helpers
 
     private func makeClient(mode: TrafficalClientOptions.EvaluationMode, localConfig: TrafficalConfigBundle? = nil) -> TrafficalClient {
