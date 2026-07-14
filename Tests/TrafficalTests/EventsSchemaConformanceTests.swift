@@ -16,6 +16,15 @@ import XCTest
 /// property typing, the ExposureLayerInfo `probability` bound, track `values`
 /// number map, and TrackAttribution constraints). It is intentionally not a
 /// general draft-07 engine.
+///
+/// TODO(drift): validate directly against `sdk-spec/schemas/events.schema.json`
+/// instead of this hand-rolled subset, to catch drift the subset can't see
+/// (e.g. new required fields or tightened bounds added to the schema). Deferred
+/// because the SDK is intentionally dependency-free (`Package.swift` has no
+/// dependencies) and Foundation ships no JSON-Schema draft-07 validator, so
+/// closing this gap means either vendoring a validator or writing a general
+/// draft-07 engine ($ref/allOf/enum/format) — out of scope for a targeted fix.
+/// Until then the subset validator is kept in lockstep with the schema by hand.
 final class EventsSchemaConformanceTests: XCTestCase {
 
     func test_events_conformance_vectors() throws {
