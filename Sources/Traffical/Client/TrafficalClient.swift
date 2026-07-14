@@ -33,6 +33,8 @@ public final class TrafficalClient: @unchecked Sendable {
     private var overrides: [String: TrafficalParameterValue] = [:]
     private var refreshTask: Task<Void, Never>?
     private var lastSuccessfulRefresh: Date?
+    /// Server-suggested refresh cadence (ms); honored over the default when set.
+    private var suggestedRefreshMs: Int?
     private(set) public var isInitialized: Bool = false
 
     // MARK: - Debug accessors
@@ -79,7 +81,7 @@ public final class TrafficalClient: @unchecked Sendable {
             debugLogger: options.debugLogger
         )
         self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env)
-        self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env)
+        self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env, resolveTimeoutMs: options.resolveTimeoutMs)
         self.bundleCache = BundleCache(projectId: options.projectId, env: options.env, directory: directory)
         self.serverCache = ServerResponseCache(projectId: options.projectId, env: options.env, directory: directory)
         self.defaultsStore = DefaultsStore()
@@ -397,6 +399,7 @@ public final class TrafficalClient: @unchecked Sendable {
                 currentBundle = bundle
                 etag = result.etag
                 lastSuccessfulRefresh = Date()
+                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
                 stateLock.unlock()
                 defaultsStore.setString(result.etag, forKey: etagDefaultsKey)
                 logConfig(.info, "config bundle loaded", details: [
@@ -409,6 +412,7 @@ public final class TrafficalClient: @unchecked Sendable {
                 // ETag matched — bundle stays as-is but the refresh did succeed.
                 stateLock.lock()
                 lastSuccessfulRefresh = Date()
+                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
                 stateLock.unlock()
                 logConfig(.info, "config not modified (304)", details: ["etag": current ?? "—"])
             }
@@ -425,6 +429,7 @@ public final class TrafficalClient: @unchecked Sendable {
             stateLock.lock()
             serverResponse = response
             lastSuccessfulRefresh = Date()
+            if let s = response.suggestedRefreshMs { suggestedRefreshMs = Int(s) }
             stateLock.unlock()
             if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
                 serverCache.write(data)
@@ -445,10 +450,15 @@ public final class TrafficalClient: @unchecked Sendable {
 
     private func startBackgroundRefresh() {
         guard options.refreshIntervalMs > 0 else { return }
-        let intervalNs = UInt64(options.refreshIntervalMs) * 1_000_000
         refreshTask = Task { [weak self] in
             while let self = self, !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNs)
+                // Honor a server `suggestedRefreshMs` over the default, and apply
+                // ±10% jitter so clients don't stampede the config endpoint.
+                self.stateLock.lock()
+                let base = self.suggestedRefreshMs ?? self.options.refreshIntervalMs
+                self.stateLock.unlock()
+                let jittered = Double(base) * Double.random(in: 0.9...1.1)
+                try? await Task.sleep(nanoseconds: UInt64(max(0, jittered)) * 1_000_000)
                 try? await self.refresh()
             }
         }

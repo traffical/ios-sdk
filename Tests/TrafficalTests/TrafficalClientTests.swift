@@ -122,6 +122,36 @@ final class TrafficalClientTests: XCTestCase {
         XCTAssertNotEqual(client.getStableId(), first)
     }
 
+    // S4: trackExposure emits exactly ONE exposure event per call (not one per
+    // layer), and session dedup suppresses a repeat exposure for the same
+    // (unit, policy, allocation).
+    func test_exposure_emits_single_event_and_dedups() async throws {
+        var exposureEvents: [[String: Any]] = []
+        let flushed = expectation(description: "flushed")
+        MockURLProtocol.handler = { request in
+            if request.url?.path.contains("v1/events/batch") == true {
+                if let body = request.httpBody,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   let events = json["events"] as? [[String: Any]] {
+                    exposureEvents += events.filter { ($0["type"] as? String) == "exposure" }
+                }
+                flushed.fulfill()
+            }
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
+        let decision = client.decide(defaults: ["ui.color": .string("#FFF")])
+        client.trackExposure(decision)   // first exposure -> queues one event
+        client.trackExposure(decision)   // duplicate -> deduped, queues nothing
+        lifecycle.emit(.background)       // single flush
+        await fulfillment(of: [flushed], timeout: 2.0)
+
+        XCTAssertEqual(exposureEvents.count, 1, "exactly one exposure event across both calls")
+        let layers = try XCTUnwrap(exposureEvents.first?["layers"] as? [[String: Any]])
+        XCTAssertEqual(layers.count, 1, "single event carries the one exposed layer")
+    }
+
     // MARK: - Event contract (configVersion + propensity)
 
     func test_events_carry_config_version_of_evaluated_bundle() async throws {

@@ -72,12 +72,15 @@ public final class DecisionClient: @unchecked Sendable {
     private let orgId: String
     private let projectId: String
     private let env: String
+    /// Server-resolve request timeout (spec default: 5s).
+    private let resolveTimeoutMs: Int
 
-    public init(http: TrafficalHTTPClient, orgId: String, projectId: String, env: String) {
+    public init(http: TrafficalHTTPClient, orgId: String, projectId: String, env: String, resolveTimeoutMs: Int = 5_000) {
         self.http = http
         self.orgId = orgId
         self.projectId = projectId
         self.env = env
+        self.resolveTimeoutMs = resolveTimeoutMs
     }
 
     public func resolve(context: TrafficalContext) async throws -> ServerResolveResponse {
@@ -88,7 +91,7 @@ public final class DecisionClient: @unchecked Sendable {
             "context": contextToAny(context),
         ]
         let data = try JSONSerialization.data(withJSONObject: body)
-        let response = try await http.post(path: "v1/resolve", body: data)
+        let response = try await http.post(path: "v1/resolve", body: data, timeoutMs: resolveTimeoutMs)
         guard (200..<300).contains(response.statusCode) else {
             throw TrafficalHTTPClient.Failure.invalidResponse
         }
