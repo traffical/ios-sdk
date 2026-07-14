@@ -107,19 +107,19 @@ final class TrafficalClientTests: XCTestCase {
 
     func test_track_emits_event_to_logger() {
         let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
-        client.track("purchase", properties: ["orderId": "ord_1"], value: 99.99)
+        client.track("purchase", properties: ["orderId": "ord_1"], options: .init(value: 99.99))
         // The event is queued — drain is tested in EventLoggerTests.
         // Here we just assert the public API doesn't crash and that there is
         // at least a stable ID to attribute against.
-        XCTAssertFalse(client.getStableID().isEmpty)
+        XCTAssertFalse(client.getStableId().isEmpty)
     }
 
     func test_identify_clears_exposure_dedup() {
         let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
-        let first = client.getStableID()
+        let first = client.getStableId()
         client.identify("user_logged_in_42")
-        XCTAssertEqual(client.getStableID(), "user_logged_in_42")
-        XCTAssertNotEqual(client.getStableID(), first)
+        XCTAssertEqual(client.getStableId(), "user_logged_in_42")
+        XCTAssertNotEqual(client.getStableId(), first)
     }
 
     // MARK: - Event contract (configVersion + propensity)

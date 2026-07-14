@@ -21,7 +21,7 @@ public final class TrafficalClient: @unchecked Sendable {
     private let lifecycleProvider: LifecycleProvider
     private let eventLogger: EventLogger
     private let errorBoundary: ErrorBoundary
-    private let exposureDedup = ExposureDeduplicator()
+    private let exposureDedup: ExposureDeduplicator
     private let attributionMap = AttributionMap()
     private let assignmentEmitter: AssignmentLogEmitter?
 
@@ -86,11 +86,19 @@ public final class TrafficalClient: @unchecked Sendable {
         self.stableIDProvider = StableIDProvider(keychain: keychain ?? KeychainStore())
         self.lifecycleProvider = lifecycleProvider ?? UIKitLifecycleProvider()
         self.errorBoundary = ErrorBoundary()
+        self.exposureDedup = ExposureDeduplicator(
+            ttl: TimeInterval(options.exposureSessionTtlMs) / 1000.0
+        )
         self.eventLogger = EventLogger(
             http: http,
             projectId: options.projectId,
             env: options.env,
             lifecycleProvider: self.lifecycleProvider,
+            configuration: EventLogger.Configuration(
+                batchSize: options.batchSize,
+                flushIntervalMs: options.flushIntervalMs,
+                timeoutMs: options.eventsTimeoutMs
+            ),
             directory: directory
         )
         if let logger = options.assignmentLogger {
@@ -116,7 +124,7 @@ public final class TrafficalClient: @unchecked Sendable {
         if let cachedServer = serverCache.read() {
             self.serverResponse = cachedServer
         }
-        self.etag = defaultsStore.string(forKey: "etag")
+        self.etag = defaultsStore.string(forKey: etagDefaultsKey)
 
         // Foreground -> refresh in the background.
         self.lifecycleProvider.onVisibilityChange { [weak self] state in
@@ -126,6 +134,10 @@ public final class TrafficalClient: @unchecked Sendable {
     }
 
     deinit { refreshTask?.cancel() }
+
+    /// ETag persistence key, namespaced per (projectId, env) so a process
+    /// running multiple clients can't cross-contaminate conditional-GET state.
+    private var etagDefaultsKey: String { "etag-\(options.projectId)-\(options.env)" }
 
     // MARK: - Initialization
 
@@ -147,14 +159,35 @@ public final class TrafficalClient: @unchecked Sendable {
         }
     }
 
-    public func shutdown() {
+    /// Resolves once the first usable config is loaded, or the fail-open
+    /// window elapses — it MUST NOT hang when the SDK fails open on an
+    /// unavailable/malformed bundle.
+    public func waitForReady(timeoutMs: Int = 5_000) async {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutMs) / 1000.0)
+        while !bundleLoaded && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// Force an immediate out-of-band config refresh.
+    public func refreshConfig() async throws { try await refresh() }
+
+    /// Flush the event queue and await delivery of what is currently buffered.
+    public func flushEvents() async { try? await eventLogger.flush() }
+
+    /// The single teardown verb (spec A1). Cancels background refresh and
+    /// AWAITS a final event flush before returning (replaces the old
+    /// fire-and-forget `shutdown()`).
+    public func close() async {
         refreshTask?.cancel()
-        Task { try? await self.eventLogger.flush() }
+        refreshTask = nil
+        try? await eventLogger.flush()
     }
 
     // MARK: - Identity
 
-    public func getStableID() -> String { stableIDProvider.getID() }
+    /// Stable-ID accessor. Canonical casing is `getStableId` (lowercase `d`).
+    public func getStableId() -> String { stableIDProvider.getID() }
 
     public func identify(_ unitKey: String) {
         stableIDProvider.setID(unitKey)
@@ -196,9 +229,10 @@ public final class TrafficalClient: @unchecked Sendable {
 
     // MARK: - Batch decide
 
+    /// Full decision with metadata. Context-first argument order (spec A1).
     public func decide(
-        defaults: [String: TrafficalParameterValue],
-        context: TrafficalContext = [:]
+        context: TrafficalContext = [:],
+        defaults: [String: TrafficalParameterValue]
     ) -> TrafficalDecisionResult {
         return errorBoundary.capture(
             "decide",
@@ -216,46 +250,92 @@ public final class TrafficalClient: @unchecked Sendable {
         }
     }
 
+    /// Resolved parameter assignments only (no decision metadata). Context-first
+    /// argument order (spec A1). Does NOT auto-track exposure.
+    public func getParams(
+        context: TrafficalContext = [:],
+        defaults: [String: TrafficalParameterValue]
+    ) -> [String: TrafficalParameterValue] {
+        return decide(context: context, defaults: defaults).assignments
+    }
+
     /// Track an exposure event for a previously-computed decision. Caller
     /// uses this when they want to delay exposure until after the variant
     /// is actually shown (matches `@traffical/js-client`).
     public func trackExposure(_ decision: TrafficalDecisionResult) {
+        let anonymousId = stableIDProvider.getID()
         guard !options.disableCloudEvents else {
-            assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
+            assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: anonymousId)
             return
         }
         let unitKey = decision.metadata.unitKeyValue
         guard !unitKey.isEmpty else { return }
 
-        assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
+        assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: anonymousId)
 
+        // S4: emit exactly ONE exposure event per call, carrying ONLY
+        // newly-exposed, non-attributionOnly layers. Session dedup is on by
+        // default. If nothing survives filtering, emit NO event.
+        var exposedLayers: [TrafficalLayerResolution] = []
         for layer in decision.metadata.layers {
-            guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
             if layer.attributionOnly { continue }
-            if !exposureDedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
+            guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
+            if options.deduplicateExposures,
+               !exposureDedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
                 continue
             }
-            let event = TrafficalExposureEvent(
-                base: makeBase(unitKey: unitKey, context: decision.metadata.filteredContext),
-                decisionId: decision.decisionId,
-                assignments: decision.assignments,
-                layers: decision.metadata.layers,
-                configVersion: decision.metadata.configVersion
-            )
-            eventLogger.log(.exposure(event))
+            exposedLayers.append(layer)
         }
+        guard !exposedLayers.isEmpty else { return }
+
+        let event = TrafficalExposureEvent(
+            base: makeBase(unitKey: unitKey, context: decision.metadata.filteredContext),
+            decisionId: decision.decisionId,
+            assignments: decision.assignments,
+            layers: exposedLayers,
+            configVersion: decision.metadata.configVersion
+        )
+        eventLogger.log(.exposure(event))
     }
 
     // MARK: - Track
 
+    /// Optional arguments for `track`, delivered as an options bag (spec A1) so
+    /// `values` and `eventTimestamp` land fleet-wide.
+    public struct TrackOptions: Sendable {
+        /// Link this event to a prior `decide()`.
+        public var decisionId: String?
+        /// Override the unit for this event (else the stable id).
+        public var unitKey: String?
+        /// Single numeric value (e.g. revenue).
+        public var value: Double?
+        /// Multiple named numeric values.
+        public var values: [String: Double]?
+        /// Explicit event time (ISO 8601); else "now".
+        public var eventTimestamp: String?
+
+        public init(
+            decisionId: String? = nil,
+            unitKey: String? = nil,
+            value: Double? = nil,
+            values: [String: Double]? = nil,
+            eventTimestamp: String? = nil
+        ) {
+            self.decisionId = decisionId
+            self.unitKey = unitKey
+            self.value = value
+            self.values = values
+            self.eventTimestamp = eventTimestamp
+        }
+    }
+
     public func track(
         _ event: String,
         properties: [String: Any]? = nil,
-        value: Double? = nil,
-        decisionId: String? = nil
+        options trackOptions: TrackOptions = TrackOptions()
     ) {
         guard !options.disableCloudEvents else { return }
-        let unitKey = getStableID()
+        let unitKey = trackOptions.unitKey ?? getStableId()
         let attributionList: [TrafficalTrackAttribution]?
         switch options.attributionMode {
         case .cumulative:
@@ -266,10 +346,11 @@ public final class TrafficalClient: @unchecked Sendable {
             attributionList = nil
         }
         let trackEvent = TrafficalTrackEvent(
-            base: makeBase(unitKey: unitKey, context: nil),
+            base: makeBase(unitKey: unitKey, context: nil, timestamp: trackOptions.eventTimestamp),
             event: event,
-            decisionId: decisionId,
-            value: value,
+            decisionId: trackOptions.decisionId,
+            value: trackOptions.value,
+            values: trackOptions.values,
             properties: properties.map { TrafficalJSON.from(any: $0) },
             attribution: attributionList
         )
@@ -317,7 +398,7 @@ public final class TrafficalClient: @unchecked Sendable {
                 etag = result.etag
                 lastSuccessfulRefresh = Date()
                 stateLock.unlock()
-                defaultsStore.setString(result.etag, forKey: "etag")
+                defaultsStore.setString(result.etag, forKey: etagDefaultsKey)
                 logConfig(.info, "config bundle loaded", details: [
                     "version": bundle.version,
                     "parameters": String(bundle.parameters.count),
@@ -485,14 +566,14 @@ public final class TrafficalClient: @unchecked Sendable {
         return merged
     }
 
-    private func makeBase(unitKey: String, context: TrafficalContext?) -> TrafficalBaseEvent {
+    private func makeBase(unitKey: String, context: TrafficalContext?, timestamp: String? = nil) -> TrafficalBaseEvent {
         return TrafficalBaseEvent(
             id: TrafficalIDGenerator.exposureId(),
             orgId: options.orgId,
             projectId: options.projectId,
             env: options.env,
             unitKey: unitKey,
-            timestamp: TrafficalTime.now(),
+            timestamp: timestamp ?? TrafficalTime.now(),
             context: context,
             sdkName: trafficalSDKName,
             sdkVersion: trafficalSDKVersion
