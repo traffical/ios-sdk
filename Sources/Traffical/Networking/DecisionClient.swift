@@ -152,7 +152,8 @@ func decodeServerResolveResponse(_ data: Data) throws -> ServerResolveResponse {
             var ctx: TrafficalContext = [:]
             for (k, v) in raw { ctx[k] = TrafficalContextValue.from(any: v) }
             return ctx
-        }
+        },
+        configVersion: metadataDict["configVersion"] as? String
     )
 
     return ServerResolveResponse(

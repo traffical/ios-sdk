@@ -195,8 +195,15 @@ public final class TrafficalClient: @unchecked Sendable {
         stableIDProvider.setID(unitKey)
         exposureDedup.clear()
         attributionMap.clearAll()
-        if options.evaluationMode == .server {
+        switch options.evaluationMode {
+        case .server:
             Task { try? await self.refreshServer() }
+        case .bundle:
+            // The stable id changed, so any prefetched edge results are stale —
+            // re-prefetch against the new identity.
+            if let bundle = currentBundleSnapshot() {
+                Task { await self.prefetchEdgeResults(bundle: bundle) }
+            }
         }
     }
 
@@ -408,6 +415,9 @@ public final class TrafficalClient: @unchecked Sendable {
                     "layers": String(bundle.layers.count),
                     "etag": result.etag ?? "—",
                 ])
+                // Prefetch edge-mode per-entity results for the fresh bundle so
+                // bundle-mode decide() can interleave them synchronously.
+                await prefetchEdgeResults(bundle: bundle)
             } else if result.notModified {
                 // ETag matched — bundle stays as-is but the refresh did succeed.
                 stateLock.lock()
@@ -558,6 +568,52 @@ public final class TrafficalClient: @unchecked Sendable {
             assignments: assignments,
             metadata: metadata
         )
+    }
+
+    /// Prefetches edge-mode per-entity results so bundle-mode `decide()` can
+    /// interleave them synchronously (mirrors js-client `_prefetchEdgeResults`).
+    /// Collects every running `resolutionMode == .edge` policy, batch-resolves
+    /// via `DecisionClient.decideEntityBatch`, and populates `cachedEdgeOptions`.
+    /// Failures are swallowed (fail-open): the engine simply skips an edge
+    /// policy whose result is absent.
+    private func prefetchEdgeResults(bundle: TrafficalConfigBundle) async {
+        let edgePolicies = bundle.layers.flatMap { $0.policies }.filter {
+            $0.entityConfig?.resolutionMode == .edge && $0.state == .running
+        }
+        guard !edgePolicies.isEmpty else {
+            stateLock.lock(); cachedEdgeOptions = nil; stateLock.unlock()
+            return
+        }
+
+        let context = enrichContext([:])
+        let unitKeyValue = getUnitKeyValue(bundle: bundle, context: context) ?? ""
+
+        var requests: [EdgeDecideRequest] = []
+        for policy in edgePolicies {
+            guard let cfg = policy.entityConfig,
+                  let entityId = buildEntityId(entityKeys: cfg.entityKeys, context: context) else { continue }
+            var allocationCount: Int?
+            if let dynamic = cfg.dynamicAllocations,
+               let n = context[dynamic.countKey]?.numberProjection, n > 0 {
+                allocationCount = Int(n.rounded(.down))
+            }
+            requests.append(EdgeDecideRequest(
+                policyId: policy.id,
+                entityId: entityId,
+                entityKeys: cfg.entityKeys,
+                context: context,
+                unitKeyValue: unitKeyValue,
+                allocationCount: allocationCount
+            ))
+        }
+        guard !requests.isEmpty, let responses = try? await decisionClient.decideEntityBatch(requests) else { return }
+
+        var results: [String: EdgeResult] = [:]
+        for r in responses {
+            results[r.policyId] = EdgeResult(allocationIndex: r.allocationIndex, entityId: r.entityId)
+        }
+        stateLock.lock(); cachedEdgeOptions = ResolveOptions(edgeResults: results); stateLock.unlock()
+        logConfig(.info, "edge prefetch complete", details: ["policies": String(results.count)])
     }
 
     private func enrichContext(_ context: TrafficalContext) -> TrafficalContext {
@@ -734,25 +790,38 @@ private func serialize(weights: EntityWeights) -> [String: Any] {
 }
 
 private func serialize(serverResponse response: ServerResolveResponse) -> [String: Any] {
+    var metadata: [String: Any] = [
+        "timestamp": response.metadata.timestamp,
+        "unitKeyValue": response.metadata.unitKeyValue,
+        // Serialize the FULL per-layer resolution so a cold-start read resolves
+        // (and attributes) identically to the live response.
+        "layers": response.metadata.layers.map { layer -> [String: Any] in
+            var dict: [String: Any] = [
+                "layerId": layer.layerId,
+                "bucket": layer.bucket,
+                "attributionOnly": layer.attributionOnly,
+            ]
+            if let p = layer.policyId { dict["policyId"] = p }
+            if let pk = layer.policyKey { dict["policyKey"] = pk }
+            if let aid = layer.allocationId { dict["allocationId"] = aid }
+            if let n = layer.allocationName { dict["allocationName"] = n }
+            if let ak = layer.allocationKey { dict["allocationKey"] = ak }
+            if let uk = layer.unitKey { dict["unitKey"] = uk }
+            if let ukv = layer.unitKeyValue { dict["unitKeyValue"] = ukv }
+            if let prob = layer.probability { dict["probability"] = prob }
+            if let mv = layer.modelVersion { dict["modelVersion"] = mv }
+            return dict
+        },
+    ]
+    if let filtered = response.metadata.filteredContext {
+        metadata["filteredContext"] = contextToAny(filtered)
+    }
+    if let cv = response.metadata.configVersion { metadata["configVersion"] = cv }
+
     var out: [String: Any] = [
         "decisionId": response.decisionId,
         "assignments": response.assignments.mapValues(\.asAny),
-        "metadata": [
-            "timestamp": response.metadata.timestamp,
-            "unitKeyValue": response.metadata.unitKeyValue,
-            "layers": response.metadata.layers.map { layer -> [String: Any] in
-                var dict: [String: Any] = [
-                    "layerId": layer.layerId,
-                    "bucket": layer.bucket,
-                    "attributionOnly": layer.attributionOnly,
-                ]
-                if let p = layer.policyId { dict["policyId"] = p }
-                if let n = layer.allocationName { dict["allocationName"] = n }
-                if let prob = layer.probability { dict["probability"] = prob }
-                if let mv = layer.modelVersion { dict["modelVersion"] = mv }
-                return dict
-            },
-        ],
+        "metadata": metadata,
     ]
     if let v = response.stateVersion { out["stateVersion"] = v }
     if let ms = response.suggestedRefreshMs { out["suggestedRefreshMs"] = ms }
