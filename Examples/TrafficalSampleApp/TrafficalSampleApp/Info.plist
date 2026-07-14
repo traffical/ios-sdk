@@ -16,6 +16,14 @@
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>TrafficalOrgId</key>
+    <string>$(TRAFFICAL_ORG_ID)</string>
+    <key>TrafficalProjectId</key>
+    <string>$(TRAFFICAL_PROJECT_ID)</string>
+    <key>TrafficalEnv</key>
+    <string>$(TRAFFICAL_ENV)</string>
+    <key>TrafficalAPIKey</key>
+    <string>$(TRAFFICAL_API_KEY)</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>

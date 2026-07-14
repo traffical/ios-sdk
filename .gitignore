@@ -28,3 +28,7 @@ Package.resolved
 
 ## Logs
 *.log
+
+## Secrets (local credentials for the sample app; commit only *.example templates)
+Secrets.xcconfig
+**/Secrets.xcconfig
