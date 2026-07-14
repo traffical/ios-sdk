@@ -89,7 +89,7 @@ final class DemoModel: ObservableObject {
             debugLogger: { [bridge] event in bridge.forwardDebug(event) }
         )
         self.client = TrafficalClient(options: options)
-        self.stableID = client.getStableID()
+        self.stableID = client.getStableId()
         bridge.attach(self)
         readSnapshot()
     }
@@ -112,14 +112,14 @@ final class DemoModel: ObservableObject {
     func reroll() {
         let newID = UUID().uuidString
         client.identify(newID)
-        stableID = client.getStableID()
+        stableID = client.getStableId()
         recordEvent(DemoEvent.systemEvent("re-rolled user → \(shortID(newID))"))
         readSnapshot()
     }
 
     func identifyAsMarcel() {
         client.identify("demo_user_marcel")
-        stableID = client.getStableID()
+        stableID = client.getStableId()
         recordEvent(DemoEvent.systemEvent("identified as demo_user_marcel"))
         readSnapshot()
     }
@@ -127,7 +127,7 @@ final class DemoModel: ObservableObject {
     func trackPurchase() {
         let orderId = "ord_\(Int.random(in: 1000...9999))"
         let value = 99.99
-        client.track("purchase", properties: ["orderId": orderId], value: value)
+        client.track("purchase", properties: ["orderId": orderId], options: .init(value: value))
         recordEvent(DemoEvent.trackEvent(name: "purchase", summary: "\(orderId) · $\(String(format: "%.2f", value))"))
     }
 

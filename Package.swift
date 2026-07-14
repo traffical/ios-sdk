@@ -24,7 +24,10 @@ let package = Package(
         .target(
             name: "Traffical",
             dependencies: ["TrafficalCore"],
-            path: "Sources/Traffical"
+            path: "Sources/Traffical",
+            resources: [
+                .copy("PrivacyInfo.xcprivacy"),
+            ]
         ),
         .testTarget(
             name: "TrafficalCoreTests",

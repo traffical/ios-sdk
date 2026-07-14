@@ -56,3 +56,32 @@ jobs:
         run: brew install swiftlint
       - name: Run SwiftLint
         run: swiftlint lint --strict
+
+  spec-pin-freshness:
+    name: sdk-spec pin freshness (stale-pin gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Fail if the pinned sdk-spec is behind the latest spec tag
+        run: |
+          set -euo pipefail
+          cd sdk-spec
+          git fetch --tags --force origin
+          # Latest semver-ish tag on the spec repo (e.g. v0.7.0).
+          latest_tag="$(git tag -l 'v*' --sort=-v:refname | head -n1)"
+          if [ -z "$latest_tag" ]; then
+            echo "No tags found on sdk-spec; skipping stale-pin gate."
+            exit 0
+          fi
+          pinned="$(git rev-parse HEAD)"
+          tagged="$(git rev-list -n1 "$latest_tag")"
+          echo "Pinned submodule commit: $pinned"
+          echo "Latest spec tag:         $latest_tag ($tagged)"
+          if [ "$pinned" != "$tagged" ]; then
+            echo "::error::sdk-spec submodule is not pinned to the latest spec tag ($latest_tag)."
+            echo "Update the submodule: git -C sdk-spec fetch --tags && git -C sdk-spec checkout $latest_tag && git add sdk-spec"
+            exit 1
+          fi
+          echo "sdk-spec pin is up to date with $latest_tag."

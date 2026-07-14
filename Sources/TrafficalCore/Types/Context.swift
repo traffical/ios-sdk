@@ -23,9 +23,10 @@ public indirect enum TrafficalContextValue: Sendable, Equatable {
     public var stringProjection: String? {
         switch self {
         case .string(let s): return s
-        case .number(let n):
-            if n.rounded() == n { return String(Int64(n)) }
-            return String(n)
+        // Route numbers through the canonical ECMAScript Number::toString rule
+        // so this projection can NEVER trap (the old String(Int64(n)) crashed
+        // on magnitudes >= 2^63).
+        case .number(let n): return canonicalNumberString(n)
         case .bool(let b): return b ? "true" : "false"
         default: return nil
         }
