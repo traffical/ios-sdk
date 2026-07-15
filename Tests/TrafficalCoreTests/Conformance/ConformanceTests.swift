@@ -1,13 +1,8 @@
 import XCTest
 @testable import TrafficalCore
 
-// TODO(release): the sdk-spec submodule is intentionally left at the
-// (unpublished) drift-remediation-2026-07 branch HEAD in the WORKING TREE so
-// these vectors run locally, but the COMMITTED gitlink still points at the
-// last published spec tag (v0.5.0 pin) so CI's remote submodule checkout
-// doesn't break. Marcel re-pins the submodule to the published spec 0.7.0 tag
-// as part of the release handoff (the stale-pin CI gate enforces it once the
-// tag exists).
+// The sdk-spec submodule is pinned to the published v0.7.0 tag; the stale-pin
+// CI gate fails the build if it ever falls behind a newer published spec tag.
 
 /// Runs the language-agnostic test vectors from `sdk-spec/test-vectors/fixtures`.
 ///
