@@ -75,12 +75,22 @@ final class ConfigFetcherTests: XCTestCase {
         }
     }
 
-    private func makeFetcher() -> ConfigFetcher {
+    func test_config_timeout_is_applied_to_request() async throws {
+        MockURLProtocol.handler = { _ in
+            .init(statusCode: 200, headers: [:], body: Data(self.bundleJSON.utf8))
+        }
+        let fetcher = makeFetcher(configTimeoutMs: 3_000)
+        _ = try await fetcher.fetch(etag: nil)
+        let request = try XCTUnwrap(MockURLProtocol.requests.first)
+        XCTAssertEqual(request.timeoutInterval, 3.0, accuracy: 0.001)
+    }
+
+    private func makeFetcher(configTimeoutMs: Int = 10_000) -> ConfigFetcher {
         let http = TrafficalHTTPClient(
             baseURL: URL(string: "https://sdk.test")!,
             apiKey: "pk",
             session: MockURLProtocol.session()
         )
-        return ConfigFetcher(http: http, projectId: "proj_test", env: "production")
+        return ConfigFetcher(http: http, projectId: "proj_test", env: "production", configTimeoutMs: configTimeoutMs)
     }
 }

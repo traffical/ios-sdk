@@ -92,7 +92,7 @@ public final class TrafficalClient: @unchecked Sendable {
             session: urlSession,
             debugLogger: options.debugLogger
         )
-        self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env)
+        self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env, configTimeoutMs: options.configTimeoutMs)
         self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env, resolveTimeoutMs: options.resolveTimeoutMs)
         self.bundleCache = BundleCache(projectId: options.projectId, env: options.env, directory: directory)
         self.serverCache = ServerResponseCache(projectId: options.projectId, env: options.env, directory: directory)

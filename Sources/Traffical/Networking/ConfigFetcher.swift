@@ -39,11 +39,13 @@ public final class ConfigFetcher: @unchecked Sendable {
     private let http: TrafficalHTTPClient
     private let projectId: String
     private let env: String
+    private let configTimeoutMs: Int
 
-    public init(http: TrafficalHTTPClient, projectId: String, env: String) {
+    public init(http: TrafficalHTTPClient, projectId: String, env: String, configTimeoutMs: Int = 10_000) {
         self.http = http
         self.projectId = projectId
         self.env = env
+        self.configTimeoutMs = configTimeoutMs
     }
 
     public func fetch(etag: String?) async throws -> Result {
@@ -53,7 +55,7 @@ public final class ConfigFetcher: @unchecked Sendable {
         let path = "v1/config/\(projectId)?env=\(env)"
         let response: TrafficalHTTPClient.Response
         do {
-            response = try await http.get(path: path, headers: headers)
+            response = try await http.get(path: path, headers: headers, timeoutMs: configTimeoutMs)
         } catch let failure as TrafficalHTTPClient.Failure {
             switch failure {
             case .transport(let err): throw Failure.transport(err)
