@@ -142,8 +142,9 @@ enum EventSchemaValidator {
         var errors: [String] = []
 
         // BaseEvent required + type enum.
-        for field in ["type", "orgId", "projectId", "env", "unitKey", "timestamp"] {
-            if !(event[field] is String) { errors.append("base.\(field) missing/not-string") }
+        for field in ["type", "orgId", "projectId", "env", "unitKey", "timestamp"]
+        where !(event[field] is String) {
+            errors.append("base.\(field) missing/not-string")
         }
         let type = event["type"] as? String
         guard let type = type, ["exposure", "decision", "track"].contains(type) else {
@@ -202,8 +203,9 @@ enum EventSchemaValidator {
 
     private static func validateAttribution(_ attr: [String: Any]) -> [String] {
         var errors: [String] = []
-        for field in ["layerId", "policyId", "allocationName"] {
-            if !(attr[field] is String) { errors.append("attribution.\(field) missing/not-string") }
+        for field in ["layerId", "policyId", "allocationName"]
+        where !(attr[field] is String) {
+            errors.append("attribution.\(field) missing/not-string")
         }
         if let w = attr["weight"] {
             if let n = w as? NSNumber {
