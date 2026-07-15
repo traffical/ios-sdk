@@ -11,8 +11,8 @@
 
 version: "1.0"
 project:
-  id: proj_FYy8hd5j
-  orgId: org_0uM5pDR6
+  id: proj_YOUR_PROJECT_ID
+  orgId: org_YOUR_ORG_ID
 
 parameters:
   ui.color:

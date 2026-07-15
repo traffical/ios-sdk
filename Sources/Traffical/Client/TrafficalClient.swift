@@ -21,18 +21,32 @@ public final class TrafficalClient: @unchecked Sendable {
     private let lifecycleProvider: LifecycleProvider
     private let eventLogger: EventLogger
     private let errorBoundary: ErrorBoundary
-    private let exposureDedup = ExposureDeduplicator()
+    /// Session exposure dedup. `internal` (not `private`) only so conformance
+    /// tests can pre-seed the `alreadyExposed` state from the shared vectors.
+    let exposureDedup: ExposureDeduplicator
     private let attributionMap = AttributionMap()
     private let assignmentEmitter: AssignmentLogEmitter?
 
     private let stateLock = NSLock()
     private var currentBundle: TrafficalConfigBundle?
+    /// Last-good server resolve. Backs the debug accessors and serves as the
+    /// cold-start / cache-miss fallback for `decideFromServerCache`.
     private var serverResponse: ServerResolveResponse?
+    /// Server-mode per-call context cache, keyed by a canonical hash of the
+    /// enriched context (mirrors php-sdk `Client::$serverCache`). Each
+    /// `decide()` / `getParams()` resolves against the context actually passed,
+    /// not a single init-time snapshot resolved with an empty context.
+    private var serverResponsesByContext: [String: ServerResolveResponse] = [:]
+    /// Context keys with a background `/v1/resolve` already in flight, so
+    /// repeated identical contexts don't stampede the edge.
+    private var inFlightResolveKeys: Set<String> = []
     private var cachedEdgeOptions: ResolveOptions?
     private var etag: String?
     private var overrides: [String: TrafficalParameterValue] = [:]
     private var refreshTask: Task<Void, Never>?
     private var lastSuccessfulRefresh: Date?
+    /// Server-suggested refresh cadence (ms); honored over the default when set.
+    private var suggestedRefreshMs: Int?
     private(set) public var isInitialized: Bool = false
 
     // MARK: - Debug accessors
@@ -78,19 +92,27 @@ public final class TrafficalClient: @unchecked Sendable {
             session: urlSession,
             debugLogger: options.debugLogger
         )
-        self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env)
-        self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env)
+        self.configFetcher = ConfigFetcher(http: http, projectId: options.projectId, env: options.env, configTimeoutMs: options.configTimeoutMs)
+        self.decisionClient = DecisionClient(http: http, orgId: options.orgId, projectId: options.projectId, env: options.env, resolveTimeoutMs: options.resolveTimeoutMs)
         self.bundleCache = BundleCache(projectId: options.projectId, env: options.env, directory: directory)
         self.serverCache = ServerResponseCache(projectId: options.projectId, env: options.env, directory: directory)
         self.defaultsStore = DefaultsStore()
         self.stableIDProvider = StableIDProvider(keychain: keychain ?? KeychainStore())
         self.lifecycleProvider = lifecycleProvider ?? UIKitLifecycleProvider()
         self.errorBoundary = ErrorBoundary()
+        self.exposureDedup = ExposureDeduplicator(
+            ttl: TimeInterval(options.exposureSessionTtlMs) / 1000.0
+        )
         self.eventLogger = EventLogger(
             http: http,
             projectId: options.projectId,
             env: options.env,
             lifecycleProvider: self.lifecycleProvider,
+            configuration: EventLogger.Configuration(
+                batchSize: options.batchSize,
+                flushIntervalMs: options.flushIntervalMs,
+                timeoutMs: options.eventsTimeoutMs
+            ),
             directory: directory
         )
         if let logger = options.assignmentLogger {
@@ -116,7 +138,7 @@ public final class TrafficalClient: @unchecked Sendable {
         if let cachedServer = serverCache.read() {
             self.serverResponse = cachedServer
         }
-        self.etag = defaultsStore.string(forKey: "etag")
+        self.etag = defaultsStore.string(forKey: etagDefaultsKey)
 
         // Foreground -> refresh in the background.
         self.lifecycleProvider.onVisibilityChange { [weak self] state in
@@ -126,6 +148,10 @@ public final class TrafficalClient: @unchecked Sendable {
     }
 
     deinit { refreshTask?.cancel() }
+
+    /// ETag persistence key, namespaced per (projectId, env) so a process
+    /// running multiple clients can't cross-contaminate conditional-GET state.
+    private var etagDefaultsKey: String { "etag-\(options.projectId)-\(options.env)" }
 
     // MARK: - Initialization
 
@@ -147,21 +173,55 @@ public final class TrafficalClient: @unchecked Sendable {
         }
     }
 
-    public func shutdown() {
+    /// Resolves once the first usable config is loaded, or the fail-open
+    /// window elapses — it MUST NOT hang when the SDK fails open on an
+    /// unavailable/malformed bundle.
+    public func waitForReady(timeoutMs: Int = 5_000) async {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutMs) / 1000.0)
+        while !bundleLoaded && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// Force an immediate out-of-band config refresh.
+    public func refreshConfig() async throws { try await refresh() }
+
+    /// Flush the event queue and await delivery of what is currently buffered.
+    public func flushEvents() async { try? await eventLogger.flush() }
+
+    /// The single teardown verb (spec A1). Cancels background refresh and
+    /// AWAITS a final event flush before returning (replaces the old
+    /// fire-and-forget `shutdown()`).
+    public func close() async {
         refreshTask?.cancel()
-        Task { try? await self.eventLogger.flush() }
+        refreshTask = nil
+        try? await eventLogger.flush()
     }
 
     // MARK: - Identity
 
-    public func getStableID() -> String { stableIDProvider.getID() }
+    /// Stable-ID accessor. Canonical casing is `getStableId` (lowercase `d`).
+    public func getStableId() -> String { stableIDProvider.getID() }
 
     public func identify(_ unitKey: String) {
         stableIDProvider.setID(unitKey)
         exposureDedup.clear()
         attributionMap.clearAll()
-        if options.evaluationMode == .server {
+        switch options.evaluationMode {
+        case .server:
+            // The stable id (part of the unit key) changed, so every cached
+            // per-context resolve is now stale — drop them and re-resolve.
+            stateLock.lock()
+            serverResponsesByContext.removeAll()
+            inFlightResolveKeys.removeAll()
+            stateLock.unlock()
             Task { try? await self.refreshServer() }
+        case .bundle:
+            // The stable id changed, so any prefetched edge results are stale —
+            // re-prefetch against the new identity.
+            if let bundle = currentBundleSnapshot() {
+                Task { await self.prefetchEdgeResults(bundle: bundle) }
+            }
         }
     }
 
@@ -196,9 +256,10 @@ public final class TrafficalClient: @unchecked Sendable {
 
     // MARK: - Batch decide
 
+    /// Full decision with metadata. Context-first argument order (spec A1).
     public func decide(
-        defaults: [String: TrafficalParameterValue],
-        context: TrafficalContext = [:]
+        context: TrafficalContext = [:],
+        defaults: [String: TrafficalParameterValue]
     ) -> TrafficalDecisionResult {
         return errorBoundary.capture(
             "decide",
@@ -216,46 +277,92 @@ public final class TrafficalClient: @unchecked Sendable {
         }
     }
 
+    /// Resolved parameter assignments only (no decision metadata). Context-first
+    /// argument order (spec A1). Does NOT auto-track exposure.
+    public func getParams(
+        context: TrafficalContext = [:],
+        defaults: [String: TrafficalParameterValue]
+    ) -> [String: TrafficalParameterValue] {
+        return decide(context: context, defaults: defaults).assignments
+    }
+
     /// Track an exposure event for a previously-computed decision. Caller
     /// uses this when they want to delay exposure until after the variant
     /// is actually shown (matches `@traffical/js-client`).
     public func trackExposure(_ decision: TrafficalDecisionResult) {
+        let anonymousId = stableIDProvider.getID()
         guard !options.disableCloudEvents else {
-            assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
+            assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: anonymousId)
             return
         }
         let unitKey = decision.metadata.unitKeyValue
         guard !unitKey.isEmpty else { return }
 
-        assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: stableIDProvider.getID())
+        assignmentEmitter?.emit(decision: decision, type: .exposure, anonymousId: anonymousId)
 
+        // S4: emit exactly ONE exposure event per call, carrying ONLY
+        // newly-exposed, non-attributionOnly layers. Session dedup is on by
+        // default. If nothing survives filtering, emit NO event.
+        var exposedLayers: [TrafficalLayerResolution] = []
         for layer in decision.metadata.layers {
-            guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
             if layer.attributionOnly { continue }
-            if !exposureDedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
+            guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
+            if options.deduplicateExposures,
+               !exposureDedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: allocationName) {
                 continue
             }
-            let event = TrafficalExposureEvent(
-                base: makeBase(unitKey: unitKey, context: decision.metadata.filteredContext),
-                decisionId: decision.decisionId,
-                assignments: decision.assignments,
-                layers: decision.metadata.layers,
-                configVersion: decision.metadata.configVersion
-            )
-            eventLogger.log(.exposure(event))
+            exposedLayers.append(layer)
         }
+        guard !exposedLayers.isEmpty else { return }
+
+        let event = TrafficalExposureEvent(
+            base: makeBase(unitKey: unitKey, context: decision.metadata.filteredContext),
+            decisionId: decision.decisionId,
+            assignments: decision.assignments,
+            layers: exposedLayers,
+            configVersion: decision.metadata.configVersion
+        )
+        eventLogger.log(.exposure(event))
     }
 
     // MARK: - Track
 
+    /// Optional arguments for `track`, delivered as an options bag (spec A1) so
+    /// `values` and `eventTimestamp` land fleet-wide.
+    public struct TrackOptions: Sendable {
+        /// Link this event to a prior `decide()`.
+        public var decisionId: String?
+        /// Override the unit for this event (else the stable id).
+        public var unitKey: String?
+        /// Single numeric value (e.g. revenue).
+        public var value: Double?
+        /// Multiple named numeric values.
+        public var values: [String: Double]?
+        /// Explicit event time (ISO 8601); else "now".
+        public var eventTimestamp: String?
+
+        public init(
+            decisionId: String? = nil,
+            unitKey: String? = nil,
+            value: Double? = nil,
+            values: [String: Double]? = nil,
+            eventTimestamp: String? = nil
+        ) {
+            self.decisionId = decisionId
+            self.unitKey = unitKey
+            self.value = value
+            self.values = values
+            self.eventTimestamp = eventTimestamp
+        }
+    }
+
     public func track(
         _ event: String,
         properties: [String: Any]? = nil,
-        value: Double? = nil,
-        decisionId: String? = nil
+        options trackOptions: TrackOptions = TrackOptions()
     ) {
         guard !options.disableCloudEvents else { return }
-        let unitKey = getStableID()
+        let unitKey = trackOptions.unitKey ?? getStableId()
         let attributionList: [TrafficalTrackAttribution]?
         switch options.attributionMode {
         case .cumulative:
@@ -266,10 +373,11 @@ public final class TrafficalClient: @unchecked Sendable {
             attributionList = nil
         }
         let trackEvent = TrafficalTrackEvent(
-            base: makeBase(unitKey: unitKey, context: nil),
+            base: makeBase(unitKey: unitKey, context: nil, timestamp: trackOptions.eventTimestamp),
             event: event,
-            decisionId: decisionId,
-            value: value,
+            decisionId: trackOptions.decisionId,
+            value: trackOptions.value,
+            values: trackOptions.values,
             properties: properties.map { TrafficalJSON.from(any: $0) },
             attribution: attributionList
         )
@@ -308,6 +416,19 @@ public final class TrafficalClient: @unchecked Sendable {
         do {
             let result = try await configFetcher.fetch(etag: current)
             if let bundle = result.bundle {
+                // S8: validate a freshly-fetched bundle before it can replace a
+                // known-good one. A bundle with a zero/negative bucketCount or an
+                // empty unit key would make every hash degenerate — discard it
+                // and keep the last-good cached bundle rather than crash or serve
+                // garbage. (A structurally-undecodable bundle already fails open
+                // via the ConfigFetcher decode error path.)
+                guard bundle.hashing.bucketCount >= 1, !bundle.hashing.unitKey.isEmpty else {
+                    logConfig(.error, "config bundle malformed; keeping last-good", details: [
+                        "bucketCount": String(bundle.hashing.bucketCount),
+                        "unitKey": bundle.hashing.unitKey.isEmpty ? "<empty>" : bundle.hashing.unitKey,
+                    ])
+                    return
+                }
                 // Persist + swap in.
                 if let raw = try? JSONSerialization.data(withJSONObject: serialize(bundle: bundle)) {
                     bundleCache.write(raw)
@@ -316,18 +437,23 @@ public final class TrafficalClient: @unchecked Sendable {
                 currentBundle = bundle
                 etag = result.etag
                 lastSuccessfulRefresh = Date()
+                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
                 stateLock.unlock()
-                defaultsStore.setString(result.etag, forKey: "etag")
+                defaultsStore.setString(result.etag, forKey: etagDefaultsKey)
                 logConfig(.info, "config bundle loaded", details: [
                     "version": bundle.version,
                     "parameters": String(bundle.parameters.count),
                     "layers": String(bundle.layers.count),
                     "etag": result.etag ?? "—",
                 ])
+                // Prefetch edge-mode per-entity results for the fresh bundle so
+                // bundle-mode decide() can interleave them synchronously.
+                await prefetchEdgeResults(bundle: bundle)
             } else if result.notModified {
                 // ETag matched — bundle stays as-is but the refresh did succeed.
                 stateLock.lock()
                 lastSuccessfulRefresh = Date()
+                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
                 stateLock.unlock()
                 logConfig(.info, "config not modified (304)", details: ["etag": current ?? "—"])
             }
@@ -339,22 +465,61 @@ public final class TrafficalClient: @unchecked Sendable {
 
     private func refreshServer() async throws {
         logConfig(.info, "server resolve: fetching")
+        let context = enrichContext([:])
         do {
-            let response = try await decisionClient.resolve(context: enrichContext([:]))
-            stateLock.lock()
-            serverResponse = response
-            lastSuccessfulRefresh = Date()
-            stateLock.unlock()
-            if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
-                serverCache.write(data)
-            }
-            logConfig(.info, "server resolve succeeded", details: [
-                "decisionId": response.decisionId,
-                "assignments": String(response.assignments.count),
-            ])
+            _ = try await resolveAndCache(context: context, key: contextCacheKey(context))
         } catch {
             logConfig(.error, "server resolve failed: \(error)", details: ["error": "\(error)"])
             throw error
+        }
+    }
+
+    /// Resolves an (already-enriched) context on the edge and stores the
+    /// response both in the per-context cache and as the last-good snapshot.
+    @discardableResult
+    private func resolveAndCache(context: TrafficalContext, key: String) async throws -> ServerResolveResponse {
+        let response = try await decisionClient.resolve(context: context)
+        stateLock.lock()
+        serverResponsesByContext[key] = response
+        serverResponse = response
+        lastSuccessfulRefresh = Date()
+        if let s = response.suggestedRefreshMs { suggestedRefreshMs = Int(s) }
+        stateLock.unlock()
+        if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
+            serverCache.write(data)
+        }
+        logConfig(.info, "server resolve succeeded", details: [
+            "decisionId": response.decisionId,
+            "assignments": String(response.assignments.count),
+        ])
+        return response
+    }
+
+    /// Kicks off a background `/v1/resolve` for `context` if one is not already
+    /// in flight for the same key. `decide()` / `getParams()` are synchronous
+    /// and cannot await the network, so the cache converges to the contexts
+    /// actually being evaluated while the current call degrades to the last-good
+    /// snapshot (mirrors js-client `_maybeResolveForContext`).
+    private func scheduleServerResolve(context: TrafficalContext, key: String) {
+        stateLock.lock()
+        if inFlightResolveKeys.contains(key) {
+            stateLock.unlock()
+            return
+        }
+        inFlightResolveKeys.insert(key)
+        stateLock.unlock()
+        Task { [weak self] in
+            guard let self = self else { return }
+            defer {
+                self.stateLock.lock()
+                self.inFlightResolveKeys.remove(key)
+                self.stateLock.unlock()
+            }
+            do {
+                _ = try await self.resolveAndCache(context: context, key: key)
+            } catch {
+                self.logConfig(.error, "server resolve (per-context) failed: \(error)", details: ["error": "\(error)"])
+            }
         }
     }
 
@@ -364,10 +529,15 @@ public final class TrafficalClient: @unchecked Sendable {
 
     private func startBackgroundRefresh() {
         guard options.refreshIntervalMs > 0 else { return }
-        let intervalNs = UInt64(options.refreshIntervalMs) * 1_000_000
         refreshTask = Task { [weak self] in
             while let self = self, !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNs)
+                // Honor a server `suggestedRefreshMs` over the default, and apply
+                // ±10% jitter so clients don't stampede the config endpoint.
+                self.stateLock.lock()
+                let base = self.suggestedRefreshMs ?? self.options.refreshIntervalMs
+                self.stateLock.unlock()
+                let jittered = Double(base) * Double.random(in: 0.9...1.1)
+                try? await Task.sleep(nanoseconds: UInt64(max(0, jittered)) * 1_000_000)
                 try? await self.refresh()
             }
         }
@@ -440,10 +610,21 @@ public final class TrafficalClient: @unchecked Sendable {
         defaults: [String: TrafficalParameterValue],
         context: TrafficalContext
     ) -> TrafficalDecisionResult {
+        // `context` is already enriched by `computeDecision`. Look up the
+        // resolve response for THIS context, not a single init-time snapshot.
+        let key = contextCacheKey(context)
         stateLock.lock()
-        let response = serverResponse
+        let perContext = serverResponsesByContext[key]
+        let fallback = serverResponse
         stateLock.unlock()
-        guard let response = response else {
+
+        // On a per-context miss, converge the cache in the background so the
+        // next decide() with this context resolves against the edge.
+        if perContext == nil {
+            scheduleServerResolve(context: context, key: key)
+        }
+
+        guard let response = perContext ?? fallback else {
             return TrafficalDecisionResult(
                 decisionId: TrafficalIDGenerator.decisionId(),
                 assignments: defaults,
@@ -463,10 +644,72 @@ public final class TrafficalClient: @unchecked Sendable {
         var metadata = response.metadata
         if metadata.configVersion == nil { metadata.configVersion = response.stateVersion }
         return TrafficalDecisionResult(
-            decisionId: response.decisionId,
+            // Fresh decisionId per call — never reuse the resolve response's
+            // decisionId across decisions (spec 0.7.0 S8).
+            decisionId: TrafficalIDGenerator.decisionId(),
             assignments: assignments,
             metadata: metadata
         )
+    }
+
+    /// Canonical, order-independent cache key for a resolved context. Mirrors
+    /// php-sdk's `md5(json_encode($context))` — sorted keys so equivalent
+    /// contexts collapse to one edge round-trip and one cache slot.
+    private func contextCacheKey(_ context: TrafficalContext) -> String {
+        let any = contextToAny(context)
+        if JSONSerialization.isValidJSONObject(any),
+           let data = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+        // Fall back to a stable textual form if the context isn't JSON-encodable.
+        return context.keys.sorted().map { "\($0)=\(context[$0]!.asAny)" }.joined(separator: "&")
+    }
+
+    /// Prefetches edge-mode per-entity results so bundle-mode `decide()` can
+    /// interleave them synchronously (mirrors js-client `_prefetchEdgeResults`).
+    /// Collects every running `resolutionMode == .edge` policy, batch-resolves
+    /// via `DecisionClient.decideEntityBatch`, and populates `cachedEdgeOptions`.
+    /// Failures are swallowed (fail-open): the engine simply skips an edge
+    /// policy whose result is absent.
+    private func prefetchEdgeResults(bundle: TrafficalConfigBundle) async {
+        let edgePolicies = bundle.layers.flatMap { $0.policies }.filter {
+            $0.entityConfig?.resolutionMode == .edge && $0.state == .running
+        }
+        guard !edgePolicies.isEmpty else {
+            stateLock.lock(); cachedEdgeOptions = nil; stateLock.unlock()
+            return
+        }
+
+        let context = enrichContext([:])
+        let unitKeyValue = getUnitKeyValue(bundle: bundle, context: context) ?? ""
+
+        var requests: [EdgeDecideRequest] = []
+        for policy in edgePolicies {
+            guard let cfg = policy.entityConfig,
+                  let entityId = buildEntityId(entityKeys: cfg.entityKeys, context: context) else { continue }
+            var allocationCount: Int?
+            if let dynamic = cfg.dynamicAllocations,
+               let n = context[dynamic.countKey]?.numberProjection, n > 0 {
+                allocationCount = Int(n.rounded(.down))
+            }
+            requests.append(EdgeDecideRequest(
+                policyId: policy.id,
+                entityId: entityId,
+                entityKeys: cfg.entityKeys,
+                context: context,
+                unitKeyValue: unitKeyValue,
+                allocationCount: allocationCount
+            ))
+        }
+        guard !requests.isEmpty, let responses = try? await decisionClient.decideEntityBatch(requests) else { return }
+
+        var results: [String: EdgeResult] = [:]
+        for r in responses {
+            results[r.policyId] = EdgeResult(allocationIndex: r.allocationIndex, entityId: r.entityId)
+        }
+        stateLock.lock(); cachedEdgeOptions = ResolveOptions(edgeResults: results); stateLock.unlock()
+        logConfig(.info, "edge prefetch complete", details: ["policies": String(results.count)])
     }
 
     private func enrichContext(_ context: TrafficalContext) -> TrafficalContext {
@@ -485,14 +728,14 @@ public final class TrafficalClient: @unchecked Sendable {
         return merged
     }
 
-    private func makeBase(unitKey: String, context: TrafficalContext?) -> TrafficalBaseEvent {
+    private func makeBase(unitKey: String, context: TrafficalContext?, timestamp: String? = nil) -> TrafficalBaseEvent {
         return TrafficalBaseEvent(
             id: TrafficalIDGenerator.exposureId(),
             orgId: options.orgId,
             projectId: options.projectId,
             env: options.env,
             unitKey: unitKey,
-            timestamp: TrafficalTime.now(),
+            timestamp: timestamp ?? TrafficalTime.now(),
             context: context,
             sdkName: trafficalSDKName,
             sdkVersion: trafficalSDKVersion
@@ -643,25 +886,38 @@ private func serialize(weights: EntityWeights) -> [String: Any] {
 }
 
 private func serialize(serverResponse response: ServerResolveResponse) -> [String: Any] {
+    var metadata: [String: Any] = [
+        "timestamp": response.metadata.timestamp,
+        "unitKeyValue": response.metadata.unitKeyValue,
+        // Serialize the FULL per-layer resolution so a cold-start read resolves
+        // (and attributes) identically to the live response.
+        "layers": response.metadata.layers.map { layer -> [String: Any] in
+            var dict: [String: Any] = [
+                "layerId": layer.layerId,
+                "bucket": layer.bucket,
+                "attributionOnly": layer.attributionOnly,
+            ]
+            if let p = layer.policyId { dict["policyId"] = p }
+            if let pk = layer.policyKey { dict["policyKey"] = pk }
+            if let aid = layer.allocationId { dict["allocationId"] = aid }
+            if let n = layer.allocationName { dict["allocationName"] = n }
+            if let ak = layer.allocationKey { dict["allocationKey"] = ak }
+            if let uk = layer.unitKey { dict["unitKey"] = uk }
+            if let ukv = layer.unitKeyValue { dict["unitKeyValue"] = ukv }
+            if let prob = layer.probability { dict["probability"] = prob }
+            if let mv = layer.modelVersion { dict["modelVersion"] = mv }
+            return dict
+        },
+    ]
+    if let filtered = response.metadata.filteredContext {
+        metadata["filteredContext"] = contextToAny(filtered)
+    }
+    if let cv = response.metadata.configVersion { metadata["configVersion"] = cv }
+
     var out: [String: Any] = [
         "decisionId": response.decisionId,
         "assignments": response.assignments.mapValues(\.asAny),
-        "metadata": [
-            "timestamp": response.metadata.timestamp,
-            "unitKeyValue": response.metadata.unitKeyValue,
-            "layers": response.metadata.layers.map { layer -> [String: Any] in
-                var dict: [String: Any] = [
-                    "layerId": layer.layerId,
-                    "bucket": layer.bucket,
-                    "attributionOnly": layer.attributionOnly,
-                ]
-                if let p = layer.policyId { dict["policyId"] = p }
-                if let n = layer.allocationName { dict["allocationName"] = n }
-                if let prob = layer.probability { dict["probability"] = prob }
-                if let mv = layer.modelVersion { dict["modelVersion"] = mv }
-                return dict
-            },
-        ],
+        "metadata": metadata,
     ]
     if let v = response.stateVersion { out["stateVersion"] = v }
     if let ms = response.suggestedRefreshMs { out["suggestedRefreshMs"] = ms }

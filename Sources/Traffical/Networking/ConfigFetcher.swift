@@ -10,6 +10,16 @@ public final class ConfigFetcher: @unchecked Sendable {
         public let bundle: TrafficalConfigBundle?
         public let etag: String?
         public let notModified: Bool
+        /// Server-suggested refresh cadence (ms), from the `X-Suggested-Refresh-Ms`
+        /// response header. When present the SDK honors it over the default.
+        public let suggestedRefreshMs: Int?
+
+        public init(bundle: TrafficalConfigBundle?, etag: String?, notModified: Bool, suggestedRefreshMs: Int? = nil) {
+            self.bundle = bundle
+            self.etag = etag
+            self.notModified = notModified
+            self.suggestedRefreshMs = suggestedRefreshMs
+        }
     }
 
     public enum Failure: Error, CustomStringConvertible {
@@ -29,11 +39,13 @@ public final class ConfigFetcher: @unchecked Sendable {
     private let http: TrafficalHTTPClient
     private let projectId: String
     private let env: String
+    private let configTimeoutMs: Int
 
-    public init(http: TrafficalHTTPClient, projectId: String, env: String) {
+    public init(http: TrafficalHTTPClient, projectId: String, env: String, configTimeoutMs: Int = 10_000) {
         self.http = http
         self.projectId = projectId
         self.env = env
+        self.configTimeoutMs = configTimeoutMs
     }
 
     public func fetch(etag: String?) async throws -> Result {
@@ -43,7 +55,7 @@ public final class ConfigFetcher: @unchecked Sendable {
         let path = "v1/config/\(projectId)?env=\(env)"
         let response: TrafficalHTTPClient.Response
         do {
-            response = try await http.get(path: path, headers: headers)
+            response = try await http.get(path: path, headers: headers, timeoutMs: configTimeoutMs)
         } catch let failure as TrafficalHTTPClient.Failure {
             switch failure {
             case .transport(let err): throw Failure.transport(err)
@@ -51,8 +63,10 @@ public final class ConfigFetcher: @unchecked Sendable {
             }
         }
 
+        let suggested = headerValue(response.headers, "X-Suggested-Refresh-Ms").flatMap { Int($0) }
+
         if response.statusCode == 304 {
-            return Result(bundle: nil, etag: etag, notModified: true)
+            return Result(bundle: nil, etag: etag, notModified: true, suggestedRefreshMs: suggested)
         }
 
         guard (200..<300).contains(response.statusCode) else {
@@ -67,7 +81,7 @@ public final class ConfigFetcher: @unchecked Sendable {
         }
 
         let newEtag = headerValue(response.headers, "ETag") ?? headerValue(response.headers, "Etag")
-        return Result(bundle: bundle, etag: newEtag, notModified: false)
+        return Result(bundle: bundle, etag: newEtag, notModified: false, suggestedRefreshMs: suggested)
     }
 }
 

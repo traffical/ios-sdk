@@ -35,18 +35,24 @@ public final class TrafficalHTTPClient: @unchecked Sendable {
         self.debugLogger = debugLogger
     }
 
-    public func get(path: String, headers: [String: String] = [:]) async throws -> Response {
-        return try await send(method: "GET", path: path, headers: headers, body: nil)
+    /// Default per-request timeout (ms). The spec mandates explicit timeouts and
+    /// forbids relying on the platform default (60s). Config/event requests use
+    /// this 10s default; server resolve overrides it to 5s.
+    public static let defaultTimeoutMs = 10_000
+
+    public func get(path: String, headers: [String: String] = [:], timeoutMs: Int = TrafficalHTTPClient.defaultTimeoutMs) async throws -> Response {
+        return try await send(method: "GET", path: path, headers: headers, body: nil, timeoutMs: timeoutMs)
     }
 
-    public func post(path: String, headers: [String: String] = [:], body: Data) async throws -> Response {
-        return try await send(method: "POST", path: path, headers: headers, body: body)
+    public func post(path: String, headers: [String: String] = [:], body: Data, timeoutMs: Int = TrafficalHTTPClient.defaultTimeoutMs) async throws -> Response {
+        return try await send(method: "POST", path: path, headers: headers, body: body, timeoutMs: timeoutMs)
     }
 
-    private func send(method: String, path: String, headers: [String: String], body: Data?) async throws -> Response {
+    private func send(method: String, path: String, headers: [String: String], body: Data?, timeoutMs: Int) async throws -> Response {
         let url = composeURL(base: baseURL, path: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = TimeInterval(timeoutMs) / 1000.0
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue(trafficalSDKName, forHTTPHeaderField: "X-SDK-Name")

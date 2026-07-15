@@ -35,6 +35,26 @@ final class EventLoggerTests: XCTestCase {
         XCTAssertEqual(events?[1]["event"] as? String, "b")
     }
 
+    func test_http_401_permanently_disables_delivery() async throws {
+        var attempts = 0
+        MockURLProtocol.handler = { _ in
+            attempts += 1
+            return .init(statusCode: 401, headers: [:], body: Data())
+        }
+        let logger = makeLogger(batchSize: 50, intervalMs: 0)
+        logger.log(.track(makeTrackEvent("a")))
+        try await logger.flush() // trips the kill-switch (401 is swallowed, not thrown)
+
+        XCTAssertTrue(logger.isPermanentlyDisabled)
+        // Further events are dropped and no further delivery is attempted.
+        logger.log(.track(makeTrackEvent("b")))
+        try await logger.flush()
+        XCTAssertEqual(attempts, 1, "no delivery attempts after 401 kill-switch")
+        // No failed-batch file is left behind — buffered events are discarded.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: tempDir.appendingPathComponent("failed-events-proj-prod.json").path))
+    }
+
     func test_flush_persists_failed_batch_and_retries_next_flush() async throws {
         var attempt = 0
         MockURLProtocol.handler = { _ in

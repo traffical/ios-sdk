@@ -22,11 +22,20 @@ public struct DefaultDeviceInfoProvider: DeviceInfoProvider {
         var fields: [String: TrafficalContextValue] = [:]
 
         if let info = Bundle.main.infoDictionary {
+            // appVersion is a semver-style string and stays a string (relational
+            // targeting on version strings is a known spec gap).
             if let appVersion = info["CFBundleShortVersionString"] as? String {
                 fields["appVersion"] = .string(appVersion)
             }
+            // appBuildNumber is a monotonic integer build; emit it as a NUMBER so
+            // strict-typed relational conditions (e.g. appBuildNumber gte 500)
+            // match without coercion. Non-integer build strings stay strings.
             if let build = info["CFBundleVersion"] as? String {
-                fields["appBuildNumber"] = .string(build)
+                if let n = Double(build), n.rounded() == n {
+                    fields["appBuildNumber"] = .number(n)
+                } else {
+                    fields["appBuildNumber"] = .string(build)
+                }
             }
         }
 

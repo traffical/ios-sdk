@@ -107,19 +107,49 @@ final class TrafficalClientTests: XCTestCase {
 
     func test_track_emits_event_to_logger() {
         let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
-        client.track("purchase", properties: ["orderId": "ord_1"], value: 99.99)
+        client.track("purchase", properties: ["orderId": "ord_1"], options: .init(value: 99.99))
         // The event is queued — drain is tested in EventLoggerTests.
         // Here we just assert the public API doesn't crash and that there is
         // at least a stable ID to attribute against.
-        XCTAssertFalse(client.getStableID().isEmpty)
+        XCTAssertFalse(client.getStableId().isEmpty)
     }
 
     func test_identify_clears_exposure_dedup() {
         let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
-        let first = client.getStableID()
+        let first = client.getStableId()
         client.identify("user_logged_in_42")
-        XCTAssertEqual(client.getStableID(), "user_logged_in_42")
-        XCTAssertNotEqual(client.getStableID(), first)
+        XCTAssertEqual(client.getStableId(), "user_logged_in_42")
+        XCTAssertNotEqual(client.getStableId(), first)
+    }
+
+    // S4: trackExposure emits exactly ONE exposure event per call (not one per
+    // layer), and session dedup suppresses a repeat exposure for the same
+    // (unit, policy, allocation).
+    func test_exposure_emits_single_event_and_dedups() async throws {
+        var exposureEvents: [[String: Any]] = []
+        let flushed = expectation(description: "flushed")
+        MockURLProtocol.handler = { request in
+            if request.url?.path.contains("v1/events/batch") == true {
+                if let body = request.httpBody,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   let events = json["events"] as? [[String: Any]] {
+                    exposureEvents += events.filter { ($0["type"] as? String) == "exposure" }
+                }
+                flushed.fulfill()
+            }
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
+        let decision = client.decide(defaults: ["ui.color": .string("#FFF")])
+        client.trackExposure(decision)   // first exposure -> queues one event
+        client.trackExposure(decision)   // duplicate -> deduped, queues nothing
+        lifecycle.emit(.background)       // single flush
+        await fulfillment(of: [flushed], timeout: 2.0)
+
+        XCTAssertEqual(exposureEvents.count, 1, "exactly one exposure event across both calls")
+        let layers = try XCTUnwrap(exposureEvents.first?["layers"] as? [[String: Any]])
+        XCTAssertEqual(layers.count, 1, "single event carries the one exposed layer")
     }
 
     // MARK: - Event contract (configVersion + propensity)
@@ -174,6 +204,206 @@ final class TrafficalClientTests: XCTestCase {
         // Empty coefficients -> uniform softmax over the two allocations.
         XCTAssertEqual(layer.probability ?? -1, 0.5, accuracy: 1e-9)
         XCTAssertEqual(layer.modelVersion, "2026-07-02T12:00:00Z")
+    }
+
+    // Item 8: the server-response disk cache must round-trip the FULL layer
+    // metadata (policyKey/allocationId/allocationKey/unitKey/unitKeyValue) plus
+    // filteredContext and configVersion, so a cold start attributes identically.
+    func test_server_cache_round_trips_full_layer_metadata() async throws {
+        let resolveBody = """
+        {
+          "decisionId": "dec_1",
+          "assignments": { "ui.color": "#0F0" },
+          "stateVersion": "sv-9",
+          "metadata": {
+            "timestamp": "2026-05-21T00:00:00Z",
+            "unitKeyValue": "u",
+            "configVersion": "sv-9",
+            "filteredContext": { "plan": "pro" },
+            "layers": [
+              {
+                "layerId": "layer_merch", "bucket": 42, "attributionOnly": false,
+                "policyId": "policy_x", "policyKey": "px",
+                "allocationId": "alloc_1", "allocationName": "treatment", "allocationKey": "tk",
+                "unitKey": "merchantId", "unitKeyValue": "merchant-1",
+                "probability": 0.6, "modelVersion": "2026-07-02T12:00:00Z"
+              }
+            ]
+          }
+        }
+        """
+        MockURLProtocol.handler = { _ in
+            .init(statusCode: 200, headers: [:], body: Data(resolveBody.utf8))
+        }
+        let first = makeClient(mode: .server)
+        await first.initialize()
+
+        // Fresh client seeded only from the disk cache (network now failing).
+        MockURLProtocol.handler = { _ in .init(statusCode: 500, headers: [:], body: Data()) }
+        let second = makeClient(mode: .server)
+        let decision = second.decide(defaults: ["ui.color": .string("#FFF")])
+        XCTAssertEqual(decision.metadata.configVersion, "sv-9")
+        XCTAssertEqual(decision.metadata.filteredContext?["plan"], .string("pro"))
+        let layer = try XCTUnwrap(decision.metadata.layers.first)
+        XCTAssertEqual(layer.policyKey, "px")
+        XCTAssertEqual(layer.allocationId, "alloc_1")
+        XCTAssertEqual(layer.allocationKey, "tk")
+        XCTAssertEqual(layer.unitKey, "merchantId")
+        XCTAssertEqual(layer.unitKeyValue, "merchant-1")
+        XCTAssertEqual(layer.probability ?? -1, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(layer.modelVersion, "2026-07-02T12:00:00Z")
+    }
+
+    // Item 4: bundle-mode edge policies are prefetched via decideEntityBatch and
+    // interleaved into decide() from cachedEdgeOptions.
+    func test_edge_policy_prefetch_populates_decision() async throws {
+        var batchCalled = false
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if path.contains("v1/config") {
+                return .init(statusCode: 200, headers: ["ETag": "\"v1\""], body: Data(self.edgeBundleJSON.utf8))
+            }
+            if path.contains("v1/decide/entity/batch") {
+                batchCalled = true
+                return .init(statusCode: 200, headers: [:], body: Data("""
+                { "responses": [ { "policyId": "policy_edge", "allocationIndex": 1, "entityId": "e-1" } ] }
+                """.utf8))
+            }
+            return .init(statusCode: 200, headers: [:], body: Data("{}".utf8))
+        }
+        let client = makeClient(mode: .bundle)
+        await client.initialize()
+        XCTAssertTrue(batchCalled, "edge prefetch should call decideEntityBatch")
+
+        // The prefetched result is interleaved regardless of decide-time context.
+        let decision = client.decide(defaults: ["pricing.tier": .string("base")])
+        let layer = try XCTUnwrap(decision.metadata.layers.first(where: { $0.layerId == "layer_edge" }))
+        XCTAssertEqual(layer.policyId, "policy_edge")
+        XCTAssertEqual(layer.allocationName, "high") // allocations[1]
+    }
+
+    private let edgeBundleJSON = """
+    {
+      "version": "v", "orgId": "org", "projectId": "proj", "env": "prod",
+      "hashing": { "unitKey": "userId", "bucketCount": 1000 },
+      "parameters": [
+        { "key": "pricing.tier", "type": "string", "default": "base", "layerId": "layer_edge", "namespace": "pricing" }
+      ],
+      "layers": [{
+        "id": "layer_edge",
+        "policies": [{
+          "id": "policy_edge", "state": "running", "kind": "adaptive",
+          "entityConfig": { "entityKeys": ["userId"], "resolutionMode": "edge" },
+          "allocations": [
+            { "name": "low", "bucketRange": [0, 499], "overrides": { "pricing.tier": "low" } },
+            { "name": "high", "bucketRange": [500, 999], "overrides": { "pricing.tier": "high" } }
+          ],
+          "conditions": []
+        }]
+      }]
+    }
+    """
+
+    // S8: server mode must resolve against the PER-CALL context, not a single
+    // init-time snapshot resolved with an empty context. Two different contexts
+    // yield independently-resolved assignments (mirrors php-sdk per-context
+    // serverCache). decisionId is fresh per call — never the resolve response's.
+    func test_server_mode_resolves_per_call_context_independently() async throws {
+        MockURLProtocol.handler = { request in
+            let body = request.httpBody ?? Data()
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let ctx = (json?["context"] as? [String: Any]) ?? [:]
+            let plan = (ctx["plan"] as? String) ?? "none"
+            let color = plan == "pro" ? "#PRO" : "#FREE"
+            let respBody = """
+            {
+              "decisionId": "dec_\(plan)",
+              "assignments": { "ui.color": "\(color)" },
+              "metadata": { "timestamp": "2026-05-21T00:00:00Z", "unitKeyValue": "u", "layers": [] }
+            }
+            """
+            return .init(statusCode: 200, headers: [:], body: Data(respBody.utf8))
+        }
+
+        let client = makeClient(mode: .server)
+        let pro: TrafficalContext = ["plan": .string("pro")]
+        let free: TrafficalContext = ["plan": .string("free")]
+
+        // decide()/getParams() are synchronous; a cache miss kicks off a
+        // background resolve for that exact context. Prime both, then wait for
+        // each context to converge independently.
+        _ = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        _ = client.decide(context: free, defaults: ["ui.color": .string("#FFF")])
+
+        try await pollUntil(timeout: 3.0) {
+            client.string("ui.color", default: "#FFF", context: pro) == "#PRO"
+                && client.string("ui.color", default: "#FFF", context: free) == "#FREE"
+        }
+
+        XCTAssertEqual(client.string("ui.color", default: "#FFF", context: pro), "#PRO")
+        XCTAssertEqual(client.string("ui.color", default: "#FFF", context: free), "#FREE")
+
+        // Fresh decisionId per call — the resolve response's "dec_pro" is never reused.
+        let d1 = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        let d2 = client.decide(context: pro, defaults: ["ui.color": .string("#FFF")])
+        XCTAssertNotEqual(d1.decisionId, d2.decisionId, "decisionId must be fresh per call")
+        XCTAssertNotEqual(d1.decisionId, "dec_pro", "must not reuse the resolve response decisionId")
+    }
+
+    // S8: a freshly-fetched bundle that is malformed (bucketCount < 1 or an
+    // empty unit key) must be DISCARDED — the SDK keeps the last-good bundle,
+    // does not replace it, and does not crash.
+    func test_malformed_bundle_is_discarded_keeping_last_good() async throws {
+        MockURLProtocol.handler = { _ in
+            .init(statusCode: 200, headers: ["ETag": "\"bad\""], body: Data(self.malformedBundleJSON.utf8))
+        }
+        // Seeded with a known-good local bundle (version "v").
+        let client = makeClient(mode: .bundle, localConfig: makeSampleBundle())
+        XCTAssertEqual(client.configVersion, "v")
+
+        await client.initialize() // fetch returns the malformed bundle
+
+        // Last-good bundle survives: version unchanged and resolution still works.
+        XCTAssertEqual(client.configVersion, "v", "malformed bundle must not replace last-good")
+        XCTAssertTrue(client.bundleLoaded)
+        let color = client.string("ui.color", default: "#FFF")
+        XCTAssertTrue(["#0000FF", "#FF0000"].contains(color), "still resolves from last-good bundle: \(color)")
+    }
+
+    /// Same shape as `sampleBundleJSON` but with an empty `hashing.unitKey`
+    /// (decodes cleanly, so it exercises the ingestion-time validation guard
+    /// rather than the decoder's missing-field path).
+    private let malformedBundleJSON = """
+    {
+      "version": "v-malformed",
+      "orgId": "org", "projectId": "proj", "env": "prod",
+      "hashing": { "unitKey": "", "bucketCount": 1000 },
+      "parameters": [
+        { "key": "ui.color", "type": "string", "default": "#000000", "layerId": "layer_ui", "namespace": "ui" }
+      ],
+      "layers": [{
+        "id": "layer_ui",
+        "policies": [{
+          "id": "policy_ab", "state": "running", "kind": "static",
+          "allocations": [
+            { "name": "control", "bucketRange": [0, 499], "overrides": { "ui.color": "#0000FF" } },
+            { "name": "treatment", "bucketRange": [500, 999], "overrides": { "ui.color": "#FF0000" } }
+          ],
+          "conditions": []
+        }]
+      }]
+    }
+    """
+
+    /// Polls `condition` until it returns true or the timeout elapses. Used to
+    /// await background server-mode resolves that `decide()` cannot itself await.
+    private func pollUntil(timeout: TimeInterval, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(condition(), "condition not met within \(timeout)s")
     }
 
     // MARK: - Helpers

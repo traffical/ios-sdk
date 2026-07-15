@@ -99,11 +99,14 @@ public final class EventLogger: @unchecked Sendable {
         public var batchSize: Int
         public var flushIntervalMs: Int
         public var maxQueueSize: Int
+        /// Event-delivery request timeout (spec default: 10s).
+        public var timeoutMs: Int
 
-        public init(batchSize: Int = 50, flushIntervalMs: Int = 30_000, maxQueueSize: Int = 500) {
+        public init(batchSize: Int = 10, flushIntervalMs: Int = 30_000, maxQueueSize: Int = 500, timeoutMs: Int = 10_000) {
             self.batchSize = batchSize
             self.flushIntervalMs = flushIntervalMs
             self.maxQueueSize = maxQueueSize
+            self.timeoutMs = timeoutMs
         }
     }
 
@@ -116,6 +119,16 @@ public final class EventLogger: @unchecked Sendable {
     private let queueLock = NSLock()
     private var timer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "io.traffical.event-logger")
+
+    /// Auth kill-switch (spec: on HTTP 401 the SDK permanently disables event
+    /// delivery for the process lifetime rather than spinning on a credential
+    /// that will never succeed).
+    private var permanentlyDisabled = false
+    /// Bounded exponential backoff: consecutive transient failures push the
+    /// next allowed flush further out, capped so retries never stampede.
+    private var consecutiveFailures = 0
+    private var nextRetryAt: Date?
+    private let maxBackoffMs = 60_000
 
     public init(
         http: TrafficalHTTPClient,
@@ -150,6 +163,9 @@ public final class EventLogger: @unchecked Sendable {
 
     public func log(_ event: TrafficalQueuedEvent) {
         queueLock.lock()
+        // Auth kill-switch: once permanently disabled we neither buffer nor
+        // deliver — dropping is intentional.
+        if permanentlyDisabled { queueLock.unlock(); return }
         queue.append(event)
         if queue.count > configuration.maxQueueSize {
             // Drop oldest events to bound memory.
@@ -157,11 +173,28 @@ public final class EventLogger: @unchecked Sendable {
         }
         let shouldFlush = queue.count >= configuration.batchSize
         queueLock.unlock()
-        if shouldFlush { Task { try? await self.flush() } }
+        if shouldFlush { Task { await self.flushIfDue() } }
+    }
+
+    /// Automatic (timer / batch-trigger) flush that respects the auth
+    /// kill-switch and exponential backoff so failing endpoints aren't
+    /// hammered. Explicit `flush()` calls (lifecycle, `close()`, tests) bypass
+    /// the backoff gate — they represent user intent.
+    func flushIfDue() async {
+        queueLock.lock()
+        let disabled = permanentlyDisabled
+        let due = nextRetryAt.map { $0 <= Date() } ?? true
+        queueLock.unlock()
+        guard !disabled, due else { return }
+        try? await flush()
     }
 
     /// Posts everything in the queue + any disk-resident failed batches.
     public func flush() async throws {
+        queueLock.lock()
+        if permanentlyDisabled { queueLock.unlock(); return }
+        queueLock.unlock()
+
         let pending = drainQueue().map(\.payload)
         let failed = loadFailedPayloads()
         let combined = failed + pending
@@ -170,12 +203,29 @@ public final class EventLogger: @unchecked Sendable {
         do {
             try await postPayloads(combined)
             clearFailedBatches()
+            queueLock.lock(); consecutiveFailures = 0; nextRetryAt = nil; queueLock.unlock()
+        } catch is AuthFailure {
+            // HTTP 401 — permanently disable delivery and discard buffered
+            // events (they will never be accepted with this credential).
+            queueLock.lock()
+            permanentlyDisabled = true
+            queue.removeAll()
+            queueLock.unlock()
+            clearFailedBatches()
         } catch {
-            // Persist combined batch to disk for retry on next launch / flush.
+            // Transient failure: persist for retry and advance backoff.
             persistPayloads(combined)
+            queueLock.lock()
+            consecutiveFailures += 1
+            let backoff = Swift.min(maxBackoffMs, 1_000 * (1 << Swift.min(consecutiveFailures, 6)))
+            nextRetryAt = Date().addingTimeInterval(TimeInterval(backoff) / 1000.0)
+            queueLock.unlock()
             throw error
         }
     }
+
+    /// Thrown by `postPayloads` on an HTTP 401 to trip the auth kill-switch.
+    private struct AuthFailure: Error {}
 
     // MARK: - Internal
 
@@ -186,7 +236,7 @@ public final class EventLogger: @unchecked Sendable {
         timer.schedule(deadline: .now() + .milliseconds(interval), repeating: .milliseconds(interval))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
-            Task { try? await self.flush() }
+            Task { await self.flushIfDue() }
         }
         timer.resume()
         self.timer = timer
@@ -202,10 +252,17 @@ public final class EventLogger: @unchecked Sendable {
     private func postPayloads(_ payloads: [[String: Any]]) async throws {
         let body: [String: Any] = ["events": payloads]
         let data = try JSONSerialization.data(withJSONObject: body, options: [])
-        let response = try await http.post(path: "v1/events/batch", body: data)
+        let response = try await http.post(path: "v1/events/batch", body: data, timeoutMs: configuration.timeoutMs)
+        if response.statusCode == 401 { throw AuthFailure() }
         guard (200..<300).contains(response.statusCode) else {
             throw TrafficalHTTPClient.Failure.invalidResponse
         }
+    }
+
+    /// Test/introspection hook: whether the auth kill-switch has tripped.
+    public var isPermanentlyDisabled: Bool {
+        queueLock.lock(); defer { queueLock.unlock() }
+        return permanentlyDisabled
     }
 
     private func persistPayloads(_ payloads: [[String: Any]]) {

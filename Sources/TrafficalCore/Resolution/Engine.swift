@@ -69,12 +69,19 @@ public func decide(
 /// Reads the unit key value from context using the bundle's configured key.
 public func getUnitKeyValue(bundle: TrafficalConfigBundle, context: TrafficalContext) -> String? {
     guard let raw = context[bundle.hashing.unitKey] else { return nil }
+    return stringifyUnitKeyValue(raw)
+}
+
+/// Canonically stringifies a context value for use as a unit key (spec S2).
+///
+/// Numbers route through `canonicalNumberString` (ECMAScript `Number::toString`)
+/// so a numeric key produces the same bucket on every SDK, and — critically —
+/// this never traps (the old `String(Int64(n))` crashed on magnitudes ≥ 2^63).
+/// Returns `nil` for a missing/null value or a value with no scalar projection.
+func stringifyUnitKeyValue(_ raw: TrafficalContextValue) -> String? {
     if raw.isMissing { return nil }
     if let s = raw.stringValue { return s }
-    if let n = raw.numberValue {
-        if n.rounded() == n { return String(Int64(n)) }
-        return String(n)
-    }
+    if let n = raw.numberValue { return canonicalNumberString(n) }
     if let b = raw.boolValue { return b ? "true" : "false" }
     return nil
 }
@@ -126,10 +133,21 @@ func resolveInternal(
         let layerUnitKey = layer.unitKey
         let layerUnitValue: String
         if let override = layerUnitKey {
-            if let raw = context[override], !raw.isMissing {
-                layerUnitValue = raw.stringValue ?? (raw.numberValue.map { n in
-                    n.rounded() == n ? String(Int64(n)) : String(n)
-                } ?? (raw.boolValue.map { $0 ? "true" : "false" } ?? ""))
+            // S1: an empty or whitespace-only override string is INVALID
+            // configuration. Skip the layer (bucket -1, no unitKey metadata);
+            // do NOT fall back to the project unit key, do NOT crash, do NOT
+            // reject the bundle, and do NOT treat the whitespace string as a
+            // context-field name to look up.
+            if override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                layers.append(TrafficalLayerResolution(
+                    layerId: layer.id,
+                    bucket: -1,
+                    attributionOnly: !hasParams
+                ))
+                continue
+            }
+            if let raw = context[override], let value = stringifyUnitKeyValue(raw) {
+                layerUnitValue = value
             } else {
                 layerUnitValue = ""
             }
@@ -137,9 +155,9 @@ func resolveInternal(
             layerUnitValue = projectUnitKeyValue
         }
 
-        // When the unit value can't be resolved, emit a skipped layer with
-        // bucket = -1 so decision events still record it, but skip policy
-        // matching.
+        // A *valid* override that names a field absent from the context (or a
+        // missing project unit key) also skips the layer with bucket -1, but
+        // for the missing-value reason — the override name is recorded.
         if layerUnitValue.isEmpty {
             layers.append(TrafficalLayerResolution(
                 layerId: layer.id,
@@ -183,10 +201,11 @@ func resolveInternal(
                     matchedPolicy = policy
                     matchedAllocation = ctx.allocation
                     matchedProbability = ctx.probability
-                    // Prefer the model's own training timestamp (or its
-                    // `modelVersion` alias); older bundles fall back to the
-                    // policy's optimization-state version.
-                    matchedModelVersion = model.generatedAt ?? model.modelVersion ?? policy.stateVersion
+                    // S7: source strictly from the model — `generatedAt` first,
+                    // then the `modelVersion` alias. There is NO further
+                    // fallback to `policy.stateVersion`; if both are absent we
+                    // emit no modelVersion rather than a wrong label.
+                    matchedModelVersion = model.generatedAt ?? model.modelVersion
                     matchedPolicies.append(policy)
                     if hasParams { applyOverrides(ctx.allocation.overrides, to: &assignments) }
                     break

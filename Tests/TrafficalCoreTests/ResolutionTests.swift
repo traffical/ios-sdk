@@ -363,7 +363,10 @@ final class ResolutionTests: XCTestCase {
         )
     }
 
-    func test_contextual_model_version_falls_back_to_state_version() {
+    // S7: when a contextual model carries neither `generatedAt` nor
+    // `modelVersion`, the SDK MUST omit `modelVersion` entirely rather than
+    // fall back to `policy.stateVersion` (which would be a wrong label).
+    func test_contextual_model_version_omitted_when_model_has_no_timestamp() {
         let model = BundleContextualModel(
             gamma: 1.0,
             actionProbabilityFloor: 0.1,
@@ -394,7 +397,44 @@ final class ResolutionTests: XCTestCase {
         )
         let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
         let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
-        XCTAssertEqual(layer?.modelVersion, "2026-06-30T00:00:00Z")
+        XCTAssertNil(layer?.modelVersion, "modelVersion must be omitted, not sourced from stateVersion")
+    }
+
+    // S7: `generatedAt` is the canonical source, `modelVersion` the only fallback.
+    func test_contextual_model_version_prefers_generatedAt() {
+        let model = BundleContextualModel(
+            gamma: 1.0,
+            actionProbabilityFloor: 0.1,
+            defaultAllocationScore: 0,
+            coefficients: [:],
+            generatedAt: "2026-07-01T00:00:00Z",
+            modelVersion: "legacy-label"
+        )
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "L", policies: [
+                    BundlePolicy(
+                        id: "p_ctx",
+                        state: .running,
+                        kind: .adaptive,
+                        allocations: [
+                            BundleAllocation(id: "a", name: "control",
+                                             bucketRange: BundleBucketRange(start: 0, end: 999),
+                                             overrides: ["x": .string("control")]),
+                        ],
+                        conditions: [],
+                        stateVersion: "2026-06-30T00:00:00Z",
+                        contextualModel: model
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "x", type: "string", default: .string("d"), layerId: "L", namespace: ""),
+            ]
+        )
+        let decision = decide(bundle: bundle, context: ["userId": .string("u")], defaults: ["x": .string("c")])
+        let layer = decision.metadata.layers.first(where: { $0.layerId == "L" })
+        XCTAssertEqual(layer?.modelVersion, "2026-07-01T00:00:00Z")
     }
 
     func test_per_entity_bundle_policy_probability_is_weight_used() {

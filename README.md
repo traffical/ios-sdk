@@ -8,8 +8,9 @@ Resolves parameters locally from a config bundle in sub-millisecond time, with
 sensible mobile defaults: persistent cache, foreground refresh, offline
 graceful-degradation, and an embedded `localConfig` for cold-starts.
 
-> Status: in active development. Tagged `0.1.0` is the first stable release.
-> See `PLAN.md` for the build plan and stage status.
+> Status: in active development, pre-1.0. The public API follows the
+> cross-language [SDK design contract](https://github.com/traffical/sdk-spec)
+> and may still change between `0.x` releases. See `PLAN.md` for stage status.
 
 ## Installation
 
@@ -25,13 +26,14 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/traffical/ios-sdk", from: "0.1.0"),
+    .package(url: "https://github.com/traffical/ios-sdk", from: "0.5.0"),
 ]
 ```
 
 ## Quick start
 
 ```swift
+import SwiftUI
 import Traffical
 
 @main
@@ -45,37 +47,47 @@ struct MyApp: App {
             env: "production",
             apiKey: "pk_live_..."
         ))
-        Task { try? await traffical.initialize() }
+        // `initialize()` is non-throwing — the SDK fails open to localConfig,
+        // the disk cache, or your inline defaults.
+        Task { await traffical.initialize() }
     }
 
     var body: some Scene {
-        WindowGroup { ContentView().environmentObject(traffical) }
+        WindowGroup { ContentView(traffical: traffical) }
     }
 }
 
 struct ContentView: View {
-    @EnvironmentObject var traffical: TrafficalClient
+    let traffical: TrafficalClient
 
     var body: some View {
-        let color = traffical.string("checkout.button.color", default: "#1E6EFB")
+        let label = traffical.string("checkout.button.label", default: "Subscribe")
         let steps = traffical.int("mobile.onboarding_steps", default: 3)
 
         VStack {
-            Button("Subscribe") { traffical.track("subscribe_clicked") }
-                .foregroundColor(Color(hex: color))
+            Button(label) { traffical.track("subscribe_clicked") }
             Text("\(steps) onboarding steps")
         }
     }
 }
 ```
 
+`decide` and `getParams` take **context first** (`decide(context:defaults:)`),
+the stable-id accessor is `getStableId()`, and `close()` is the single teardown
+verb — it awaits a final event flush before returning.
+
 ## Documentation
 
-See [traffical.io/sdks/ios](https://traffical.io/sdks/ios) (coming with v0.1.0).
+See [traffical.io/sdks/ios](https://traffical.io/sdks/ios).
 
 The language-agnostic SDK contract lives at
-[traffical/sdk-spec](https://github.com/traffical/sdk-spec). This package passes
-every fixture in `test-vectors/`.
+[traffical/sdk-spec](https://github.com/traffical/sdk-spec). This package wires
+the bundle-mode conformance vectors (`basic`, `conditions`, `contextual`,
+unicode, boundary, per-layer unit key, and the 0.7.0 numeric / empty-unit-key /
+omitted-value / gamma-zero / high-floor vectors) plus an events-payload
+schema-validation test against `events.schema.json`. Server- and edge-mode
+vectors (`expected_resolve`, `bundle_edge_policies`) run through a separate
+harness; version-string comparison remains an intentional spec gap.
 
 ## Development
 

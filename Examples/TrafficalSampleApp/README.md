@@ -33,8 +33,20 @@ sample `purchase` event.
 
 ## Point at a real backend
 
-Edit `App.swift` and replace the `apiKey`, `orgId`, `projectId`, `env` with
-values from your Traffical dashboard. Leave the `baseURL` blank to use
+The sample ships with obviously-fake placeholder credentials so this public
+repo never contains a real key. To use your own project, provide credentials
+one of these ways (no source edits required):
+
+1. **xcconfig (recommended):** copy `Secrets.xcconfig.example` to
+   `Secrets.xcconfig` (git-ignored), fill in your values, and attach it under
+   **Project → Info → Configurations**. The values flow through Info.plist and
+   are read at launch.
+2. **Environment variables:** set `TRAFFICAL_ORG_ID`, `TRAFFICAL_PROJECT_ID`,
+   `TRAFFICAL_ENV`, and `TRAFFICAL_API_KEY` in the run scheme
+   (**Product → Scheme → Edit Scheme → Run → Arguments**).
+
+Use a **publishable** key (prefix `traffical_pk_`) — never a secret
+`traffical_sk_` key in a client app. Leave the `baseURL` blank to use
 `https://sdk.traffical.io`.
 
 This sample app intentionally uses a local SPM dependency on `../../`. Running

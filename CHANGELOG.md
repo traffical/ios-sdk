@@ -1,3 +1,13 @@
+## 0.5.0 — 2026-07-14
+
+Align to spec 0.7.0 (drift-remediation). BREAKING: iOS adopts the cross-language design contract directly.
+
+- Resolution: canonical ECMAScript `Number::toString` for numeric unit keys (S2, replaces trapping `String(Int64(n))`); empty/whitespace layer `unitKey` override skips the layer instead of falling back to the project key (S1); strictly-typed conditions with dot-notation nested lookup incl. array index/`.length` (S3); relational ops with an omitted `value` never match (S5); contextual guards `safeGamma = max(gamma, 1e-10)` and `effectiveFloor = min(floor, 1/n)` (S6); contextual `modelVersion` no longer falls back to `policy.stateVersion` (S7). `DefaultDeviceInfoProvider` emits `appBuildNumber` as a number.
+- Public API (BREAKING): `decide(context:defaults:)` / `getParams(context:defaults:)` context-first; `getStableID()` → `getStableId()`; single teardown `close()` that awaits the final flush (replaces `shutdown()`); adds `waitForReady` / `refreshConfig` / `flushEvents`; `track(_:properties:options:)` options bag (`decisionId`/`unitKey`/`value`/`values`/`eventTimestamp`); default event batch 50 → 10.
+- Runtime: `trackExposure` emits one event per call with only newly-exposed non-`attributionOnly` layers (S4), session dedup on by default (`deduplicateExposures` / `exposureSessionTtlMs`); mandatory request timeouts (config/events 10s, resolve 5s); HTTP 401 permanently disables event delivery, automatic flushes use bounded exponential backoff; honors `suggestedRefreshMs` with ±10% jitter; ETag key namespaced per (projectId, env).
+- Conformance: wired the full 0.7.0 vector set (unicode/boundary/per-layer + numeric/empty/omitted/gamma-zero/high-floor) and an events-payload schema-validation test against `events.schema.json` + `events_conformance.json`.
+
+
 ## 0.4.0 — 2026-06-04
 
 - Switch deterministic assignment from FNV-1a to the SHA-256 v2 hash. Buckets and weighted selection now derive from the first 64 bits (unsigned big-endian) of `SHA256("traffical:assignment:v2|u:<utf8ByteLen>:<unit>|l:<utf8ByteLen>:<layer>")`, computed with CryptoKit over UTF-8 bytes. This fixes the cross-experiment correlation FNV-1a exhibited on realistic UUID/ULID units and `lay_*` layer IDs, and also resolves the previous UTF-16-vs-UTF-8 framing divergence since v2 framing is byte-based. BREAKING: every unit re-buckets on upgrade. There is no migration path (no prior production users).

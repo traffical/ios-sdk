@@ -2,10 +2,35 @@ import SwiftUI
 import Traffical
 import os
 
-private let demoOrgId = "org_0uM5pDR6"
-private let demoProjectId = "proj_FYy8hd5j"
-private let demoEnv = "production"
-private let demoAPIKey = "traffical_sk_YHPH6OjwgRNGl81RwYIvLPGeVsrXLovp"
+// MARK: - Demo configuration
+//
+// The sample ships with obviously-fake placeholder credentials so this public
+// repository never contains a real key. To point the app at a live Traffical
+// project, copy `Secrets.xcconfig.example` to `Secrets.xcconfig` (git-ignored),
+// fill in your values, and attach it under Project → Info → Configurations.
+// Those build settings flow into Info.plist and are read below at runtime. You
+// can also override any value with an environment variable in the run scheme.
+//
+// IMPORTANT: a client app must use a *publishable* key (prefix `traffical_pk_`).
+// Never embed a secret `traffical_sk_` key in a shipped/sample client — secret
+// keys stay server-side only.
+
+private enum DemoConfig {
+    /// Resolves a config value from (1) the process environment, (2) the app's
+    /// Info.plist (populated from an untracked xcconfig), then (3) a clearly
+    /// fake placeholder so the sample still compiles and runs offline.
+    static func value(infoKey: String, env envKey: String, fallback: String) -> String {
+        if let v = ProcessInfo.processInfo.environment[envKey], !v.isEmpty { return v }
+        if let v = Bundle.main.object(forInfoDictionaryKey: infoKey) as? String,
+           !v.isEmpty, !v.hasPrefix("$(") { return v }
+        return fallback
+    }
+}
+
+private let demoOrgId = DemoConfig.value(infoKey: "TrafficalOrgId", env: "TRAFFICAL_ORG_ID", fallback: "org_YOUR_ORG_ID")
+private let demoProjectId = DemoConfig.value(infoKey: "TrafficalProjectId", env: "TRAFFICAL_PROJECT_ID", fallback: "proj_YOUR_PROJECT_ID")
+private let demoEnv = DemoConfig.value(infoKey: "TrafficalEnv", env: "TRAFFICAL_ENV", fallback: "production")
+private let demoAPIKey = DemoConfig.value(infoKey: "TrafficalAPIKey", env: "TRAFFICAL_API_KEY", fallback: "traffical_pk_YOUR_PUBLISHABLE_KEY")
 
 /// The three demo parameters mirror the YAML at
 /// `.traffical/config.yaml`. Add policies to any of them in the dashboard
@@ -64,7 +89,7 @@ final class DemoModel: ObservableObject {
             debugLogger: { [bridge] event in bridge.forwardDebug(event) }
         )
         self.client = TrafficalClient(options: options)
-        self.stableID = client.getStableID()
+        self.stableID = client.getStableId()
         bridge.attach(self)
         readSnapshot()
     }
@@ -87,14 +112,14 @@ final class DemoModel: ObservableObject {
     func reroll() {
         let newID = UUID().uuidString
         client.identify(newID)
-        stableID = client.getStableID()
+        stableID = client.getStableId()
         recordEvent(DemoEvent.systemEvent("re-rolled user → \(shortID(newID))"))
         readSnapshot()
     }
 
     func identifyAsMarcel() {
         client.identify("demo_user_marcel")
-        stableID = client.getStableID()
+        stableID = client.getStableId()
         recordEvent(DemoEvent.systemEvent("identified as demo_user_marcel"))
         readSnapshot()
     }
@@ -102,7 +127,7 @@ final class DemoModel: ObservableObject {
     func trackPurchase() {
         let orderId = "ord_\(Int.random(in: 1000...9999))"
         let value = 99.99
-        client.track("purchase", properties: ["orderId": orderId], value: value)
+        client.track("purchase", properties: ["orderId": orderId], options: .init(value: value))
         recordEvent(DemoEvent.trackEvent(name: "purchase", summary: "\(orderId) · $\(String(format: "%.2f", value))"))
     }
 

@@ -81,9 +81,14 @@ public func computeAllocationScore(
 
 /// Softmax with temperature gamma. Numerically stable: subtracts the max
 /// before exponentiating so large positive scores do not overflow.
+///
+/// S6: the temperature used for scaling is `safeGamma = max(gamma, 1e-10)`,
+/// never the raw gamma. A gamma of 0 (or below 1e-10) is clamped to 1e-10,
+/// yielding a near-deterministic-but-defined distribution — NOT an argmax
+/// shortcut and NOT a reset to temperature 1.
 public func softmaxProbabilities(scores: [Double], gamma: Double) -> [Double] {
     guard !scores.isEmpty else { return [] }
-    let safeGamma = gamma <= 0 ? 1 : gamma
+    let safeGamma = Swift.max(gamma, 1e-10)
 
     let maxScore = scores.max() ?? 0
     let exps = scores.map { Foundation.exp(($0 - maxScore) / safeGamma) }
@@ -99,10 +104,15 @@ public func softmaxProbabilities(scores: [Double], gamma: Double) -> [Double] {
 /// Clamp any probability below the floor up to the floor, then renormalize so
 /// the distribution still sums to 1.0. Ensures continued exploration even for
 /// allocations that the model has learned to strongly dispreference.
+///
+/// S6: the floor applied per allocation is `effectiveFloor = min(floor, 1/n)`,
+/// where `n` is the number of allocations, so flooring can never demand more
+/// than 100% of the probability mass. When `floor <= 0`, flooring is skipped.
 public func applyProbabilityFloor(probabilities: [Double], floor: Double) -> [Double] {
     guard floor > 0, !probabilities.isEmpty else { return probabilities }
 
-    let clamped = probabilities.map { max($0, floor) }
+    let effectiveFloor = Swift.min(floor, 1.0 / Double(probabilities.count))
+    let clamped = probabilities.map { Swift.max($0, effectiveFloor) }
     let sum = clamped.reduce(0, +)
     guard sum > 0 else { return probabilities }
     return clamped.map { $0 / sum }
