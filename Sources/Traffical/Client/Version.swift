@@ -1,7 +1,7 @@
 import Foundation
 
 /// SDK version. Bumped by the release workflow when changesets are consumed.
-public let trafficalSDKVersion = "0.6.0"
+public let trafficalSDKVersion = "0.6.1"
 
 /// SDK name. Used in event payloads and the X-SDK-Name header.
 public let trafficalSDKName = "ios"
