@@ -1,7 +1,7 @@
 import XCTest
 @testable import TrafficalCore
 
-// The sdk-spec submodule is pinned to the published v0.7.0 tag; the stale-pin
+// The sdk-spec submodule is pinned to the published v0.8.0 tag; the stale-pin
 // CI gate fails the build if it ever falls behind a newer published spec tag.
 
 /// Runs the language-agnostic test vectors from `sdk-spec/test-vectors/fixtures`.
