@@ -37,10 +37,19 @@ final class ConformanceTests: XCTestCase {
         "numeric_unit_key",
         "empty_unit_key",
         "per_layer_unit_key",
+        "contextual_key_differs",
     ]
 
     func test_all_bundle_fixtures() throws {
         for name in Self.fixtures {
+            // The spec is a submodule pinned to a published tag, so a vector
+            // added to the spec is listed here before the pin advances. Skip
+            // those rather than failing on a missing file: the vector starts
+            // enforcing on its own the moment the pin moves, and a red suite
+            // that says nothing about the SDK helps no one.
+            guard FileManager.default.fileExists(atPath: fixtureURL("bundle_\(name).json").path) else {
+                continue
+            }
             try runFixture(name: name)
         }
     }
@@ -149,6 +158,39 @@ final class ConformanceTests: XCTestCase {
                    let actualProb = chosen.probability {
                     XCTAssertEqual(actualProb, expectedProb, accuracy: 1e-4,
                                    "[\(name)/\(caseName)] propensity for \(expectedAllocation)")
+                }
+            }
+
+            // 5. Allocation identity: per-policy expectations, for bundles that
+            //    resolve more than one policy per decision. `allocationKey`
+            //    pins the warehouse join column; the propensity pins the whole
+            //    distribution, so a uniform fallback fails even on a seed that
+            //    happens to select the same arm.
+            if let expectedPolicies = testCase["expectedPolicies"] as? [String: [String: Any]] {
+                for (policyId, expected) in expectedPolicies {
+                    guard let layer = decision.metadata.layers.first(where: { $0.policyId == policyId }) else {
+                        XCTFail("[\(name)/\(caseName)] no resolved layer for policy \(policyId)")
+                        continue
+                    }
+                    if let expectedName = expected["allocationName"] as? String {
+                        XCTAssertEqual(layer.allocationName, expectedName,
+                                       "[\(name)/\(caseName)] allocation for \(policyId)")
+                    }
+                    if let expectedKey = expected["allocationKey"] as? String {
+                        XCTAssertEqual(layer.allocationKey, expectedKey,
+                                       "[\(name)/\(caseName)] allocationKey for \(policyId)")
+                    }
+                    if let probs = expected["probabilities"] as? [Any],
+                       let idx = numericInt(expected["selectedIndex"]),
+                       idx < probs.count,
+                       let expectedProb = numericDouble(probs[idx]) {
+                        guard let actualProb = layer.probability else {
+                            XCTFail("[\(name)/\(caseName)] no propensity for \(policyId)")
+                            continue
+                        }
+                        XCTAssertEqual(actualProb, expectedProb, accuracy: 1e-6,
+                                       "[\(name)/\(caseName)] propensity for \(policyId)")
+                    }
                 }
             }
         }

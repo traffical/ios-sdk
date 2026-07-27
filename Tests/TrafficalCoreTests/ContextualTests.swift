@@ -105,7 +105,11 @@ final class ContextualTests: XCTestCase {
         // Recompute the pipeline by hand: scores -> softmax -> floor.
         let model = try XCTUnwrap(policy.contextualModel)
         let scores = policy.allocations.map { alloc -> Double in
-            guard let coef = model.coefficients[alloc.name] else { return model.defaultAllocationScore }
+            // Mirrors resolveContextualPolicy: key is the identifier, name the
+            // pre-`key` fallback.
+            guard let coef = model.coefficients[alloc.key ?? alloc.name] else {
+                return model.defaultAllocationScore
+            }
             return computeAllocationScore(coefficients: coef, context: context)
         }
         let expected = applyProbabilityFloor(

@@ -152,10 +152,12 @@ public enum TrafficalBundleDecoder {
             let coefRaw = dict["coefficients"] as? [String: Any]
         else { return nil }
 
+        // Keyed by allocation KEY (see the sdk-spec "Allocation identity"
+        // contract) — preserved verbatim from the bundle's own map keys.
         var coefficients: [String: BundleAllocationCoefficients] = [:]
-        for (allocName, allocRaw) in coefRaw {
+        for (allocKey, allocRaw) in coefRaw {
             guard let allocDict = allocRaw as? [String: Any] else { continue }
-            coefficients[allocName] = decodeCoefficients(allocDict)
+            coefficients[allocKey] = decodeCoefficients(allocDict)
         }
 
         return BundleContextualModel(

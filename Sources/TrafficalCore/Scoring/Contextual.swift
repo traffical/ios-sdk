@@ -27,8 +27,17 @@ public func resolveContextualPolicy(
 
     // 1. Score each allocation in policy.allocations order — order matters
     // because weightedSelection uses array indices.
+    //
+    // Coefficients are keyed by allocation `key` — the stable identifier —
+    // with `name` as the fallback for bundles produced before `key` existed.
+    // Keying by `name` alone is the silent-failure mode this indirection
+    // exists to prevent: the lookup misses for every allocation whose display
+    // name differs from its key ("Treatment A" vs "treatment-a"), those arms
+    // score defaultAllocationScore, and the trained model degrades to a
+    // uniform softmax with nothing raised anywhere. Locked by the sdk-spec
+    // `bundle_contextual_key_differs` vector.
     let scores: [Double] = policy.allocations.map { allocation in
-        if let coefficients = model.coefficients[allocation.name] {
+        if let coefficients = model.coefficients[allocation.key ?? allocation.name] {
             return computeAllocationScore(coefficients: coefficients, context: context)
         } else {
             return model.defaultAllocationScore
