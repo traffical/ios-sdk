@@ -45,7 +45,7 @@ struct MyApp: App {
             orgId: "org_acme",
             projectId: "proj_marketplace",
             env: "production",
-            apiKey: "pk_live_..."
+            apiKey: "traffical_pk_…"
         ))
         // `initialize()` is non-throwing — the SDK fails open to localConfig,
         // the disk cache, or your inline defaults.
