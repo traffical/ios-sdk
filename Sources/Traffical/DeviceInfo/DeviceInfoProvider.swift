@@ -7,7 +7,7 @@ import UIKit
 ///
 /// When configured on the client, the SDK reads device fields from the
 /// provider and merges them into the evaluation context on every resolution.
-/// Lets the host app target experiments by app version, OS, locale, etc.
+/// Lets the host app target policies by app version, OS, locale, etc.
 public protocol DeviceInfoProvider: Sendable {
     func deviceInfo() -> [String: TrafficalContextValue]
 }

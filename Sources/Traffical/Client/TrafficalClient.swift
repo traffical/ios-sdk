@@ -287,7 +287,7 @@ public final class TrafficalClient: @unchecked Sendable {
     }
 
     /// Track an exposure event for a previously-computed decision. Caller
-    /// uses this when they want to delay exposure until after the variant
+    /// uses this when they want to delay exposure until after the allocation
     /// is actually shown (matches `@traffical/js-client`).
     public func trackExposure(_ decision: TrafficalDecisionResult) {
         let anonymousId = stableIDProvider.getID()

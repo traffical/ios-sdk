@@ -8,7 +8,7 @@ import CryptoKit
 /// byte-identical results for the same inputs.
 ///
 /// Why SHA-256 over the previous FNV-1a: FNV-1a passed single-layer uniformity
-/// but failed cross-experiment independence with realistic UUID/ULID unit keys
+/// but failed cross-layer independence with realistic UUID/ULID unit keys
 /// and `lay_*` layer IDs (assignment in one layer could predict assignment in
 /// another). SHA-256's avalanche behaviour removes that correlation. The v2
 /// contract also hashes the **UTF-8 bytes** of the input, fixing the previous

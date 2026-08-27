@@ -32,8 +32,8 @@ public func resolveContextualPolicy(
     // with `name` as the fallback for bundles produced before `key` existed.
     // Keying by `name` alone is the silent-failure mode this indirection
     // exists to prevent: the lookup misses for every allocation whose display
-    // name differs from its key ("Treatment A" vs "treatment-a"), those arms
-    // score defaultAllocationScore, and the trained model degrades to a
+    // name differs from its key ("Treatment A" vs "treatment-a"), those
+    // allocations score defaultAllocationScore, and the trained model degrades to a
     // uniform softmax with nothing raised anywhere. Locked by the sdk-spec
     // `bundle_contextual_key_differs` vector.
     let scores: [Double] = policy.allocations.map { allocation in
