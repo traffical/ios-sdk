@@ -1,5 +1,0 @@
----
-"traffical-ios": minor
----
-
-`DefaultDeviceInfoProvider` additionally emits the canonical `$`-prefixed system attributes shared by every Traffical SDK: `$os` (`ios` / `macos`; `other` on watchOS since the attribute is an enum), `$os_version` (`major.minor.patch` from `operatingSystemVersion`), `$app_version`, `$locale`, `$timezone`, `$device_model`, and `$device_type` (`UIDevice.userInterfaceIdiom`: phone → `mobile`, pad → `tablet`, else `desktop`; `desktop` where UIKit is unavailable). The existing un-prefixed keys (`appVersion`, `appBuildNumber`, `osName`, `osVersion`, `locale`, `timezone`, `deviceModel`, `screenWidth`, `screenHeight`) are unchanged; the `$` keys are the canonical ones for new conditions and are registered as system attributes in the dashboard. Condition fields now resolve the literal (flat) key before dot-path traversal, per sdk-spec 0.9.0, and the context-logging allow-list uses the same lookup; advances the sdk-spec submodule to v0.9.0 and enforces its `conditions_flat_dotted_key` conformance vector.
