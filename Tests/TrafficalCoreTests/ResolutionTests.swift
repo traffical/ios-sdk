@@ -813,4 +813,50 @@ final class ResolutionTests: XCTestCase {
         XCTAssertNil(model?.generatedAt)
         XCTAssertEqual(model?.modelVersion, "2026-07-01T00:00:00Z")
     }
+
+    // MARK: - filteredContext uses the condition field lookup (flat first, then nested)
+
+    func test_filteredContext_dotted_allowed_field_flat_first_then_nested() {
+        let bundle = makeBundle(
+            layers: [
+                BundleLayer(id: "layer_ui", policies: [
+                    BundlePolicy(
+                        id: "policy_ui",
+                        state: .running,
+                        kind: .static,
+                        allocations: [
+                            BundleAllocation(id: "a_0", name: "blue",
+                                             bucketRange: BundleBucketRange(start: 0, end: 999),
+                                             overrides: ["ui.color": .string("#0000FF")]),
+                        ],
+                        conditions: [],
+                        contextLogging: BundleContextLogging(allowedFields: ["user.device_type"])
+                    ),
+                ]),
+            ],
+            parameters: [
+                BundleParameter(key: "ui.color", type: "string", default: .string("#000000"),
+                                layerId: "layer_ui", namespace: "ui"),
+            ]
+        )
+        let defaults: [String: TrafficalParameterValue] = ["ui.color": .string("#FFFFFF")]
+
+        // Nested context: the dotted entry captures context.user.device_type.
+        let nested = decide(bundle: bundle,
+                            context: ["userId": .string("u"), "user": .object(["device_type": .string("tablet")])],
+                            defaults: defaults)
+        XCTAssertEqual(nested.metadata.filteredContext, ["user.device_type": .string("tablet")])
+
+        // Flat context: the literal key wins over the nested object.
+        let both = decide(bundle: bundle,
+                          context: ["userId": .string("u"),
+                                    "user.device_type": .string("phone"),
+                                    "user": .object(["device_type": .string("tablet")])],
+                          defaults: defaults)
+        XCTAssertEqual(both.metadata.filteredContext, ["user.device_type": .string("phone")])
+
+        // Neither shape: nothing is captured.
+        let none = decide(bundle: bundle, context: ["userId": .string("u")], defaults: defaults)
+        XCTAssertNil(none.metadata.filteredContext)
+    }
 }

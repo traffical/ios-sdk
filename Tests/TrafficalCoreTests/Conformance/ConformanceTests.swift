@@ -38,6 +38,7 @@ final class ConformanceTests: XCTestCase {
         "empty_unit_key",
         "per_layer_unit_key",
         "contextual_key_differs",
+        "conditions_flat_dotted_key",
     ]
 
     func test_all_bundle_fixtures() throws {
@@ -165,7 +166,7 @@ final class ConformanceTests: XCTestCase {
             //    resolve more than one policy per decision. `allocationKey`
             //    pins the warehouse join column; the propensity pins the whole
             //    distribution, so a uniform fallback fails even on a seed that
-            //    happens to select the same arm.
+            //    happens to select the same allocation.
             if let expectedPolicies = testCase["expectedPolicies"] as? [String: [String: Any]] {
                 for (policyId, expected) in expectedPolicies {
                     guard let layer = decision.metadata.layers.first(where: { $0.policyId == policyId }) else {

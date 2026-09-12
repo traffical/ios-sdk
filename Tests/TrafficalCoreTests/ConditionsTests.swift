@@ -114,4 +114,49 @@ final class ConditionsTests: XCTestCase {
         XCTAssertTrue(evaluateCondition(.init(field: "user.plan", op: "notExists"), context: c))
         XCTAssertFalse(evaluateCondition(.init(field: "user.plan", op: "exists"), context: c))
     }
+
+    // MARK: - Field lookup: literal flat key first, then nested
+
+    func test_flat_dotted_key_resolves_before_traversal() {
+        let cond = BundleCondition(field: "url.pathname", op: "eq", value: .string("/pricing"))
+        // Redirect-plugin shape: one literal key containing a dot.
+        XCTAssertTrue(evaluateCondition(cond, context: ["url.pathname": .string("/pricing")]))
+        XCTAssertEqual(resolveField("url.pathname", in: ["url.pathname": .string("/pricing")]), .string("/pricing"))
+        // Nested shape still resolves when no flat key exists.
+        XCTAssertTrue(evaluateCondition(cond, context: ["url": .object(["pathname": .string("/pricing")])]))
+    }
+
+    func test_flat_key_wins_when_both_shapes_present() {
+        XCTAssertEqual(resolveField("a.b", in: ["a.b": .number(1), "a": .object(["b": .number(2)])]), .number(1))
+
+        let cond = BundleCondition(field: "url.pathname", op: "eq", value: .string("/pricing"))
+        XCTAssertTrue(evaluateCondition(cond, context: [
+            "url.pathname": .string("/pricing"),
+            "url": .object(["pathname": .string("/checkout")]),
+        ]))
+        XCTAssertFalse(evaluateCondition(cond, context: [
+            "url.pathname": .string("/checkout"),
+            "url": .object(["pathname": .string("/pricing")]),
+        ]))
+    }
+
+    func test_flat_null_stops_lookup_and_is_absent() {
+        let c: TrafficalContext = ["a.b": .null, "a": .object(["b": .number(2)])]
+        XCTAssertEqual(resolveField("a.b", in: c), .null)
+        XCTAssertFalse(evaluateCondition(.init(field: "a.b", op: "exists"), context: c))
+        XCTAssertTrue(evaluateCondition(.init(field: "a.b", op: "notExists"), context: c))
+    }
+
+    func test_missing_under_both_steps_is_nil() {
+        XCTAssertNil(resolveField("url.pathname", in: [:]))
+        XCTAssertNil(resolveField("url.pathname", in: ["url": .null]))
+        XCTAssertNil(resolveField("url.pathname", in: ["url": .string("str")]))
+        XCTAssertFalse(evaluateCondition(.init(field: "url.pathname", op: "eq", value: .string("/pricing")),
+                                         context: ["referrer": .string("x")]))
+    }
+
+    func test_strict_typing_preserved_after_flat_lookup() {
+        XCTAssertFalse(evaluateCondition(.init(field: "a.b", op: "gt", value: .number(1)), context: ["a.b": .string("2")]))
+        XCTAssertTrue(evaluateCondition(.init(field: "a.b", op: "gt", value: .number(1)), context: ["a.b": .number(2)]))
+    }
 }

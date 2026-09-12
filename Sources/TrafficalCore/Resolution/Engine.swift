@@ -328,9 +328,14 @@ private func filterContext(context: TrafficalContext, matched: [BundlePolicy]) -
         }
     }
     if allowed.isEmpty { return nil }
+    // Same lookup as condition evaluation (flat key first, then dot path), so
+    // a dotted allowed field such as "user.device_type" captures the nested
+    // value when the context nests and the literal key when it is flat.
     var out: TrafficalContext = [:]
-    for field in allowed where context[field] != nil {
-        out[field] = context[field]
+    for field in allowed {
+        if let value = resolveField(field, in: context) {
+            out[field] = value
+        }
     }
     return out.isEmpty ? nil : out
 }

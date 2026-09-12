@@ -3,8 +3,9 @@ import Foundation
 /// Evaluates a single condition against an evaluation context (spec S3).
 ///
 /// Comparisons are **strictly typed** — there is no `"42" == 42` coercion
-/// anywhere. Fields are resolved with **dot-notation nested lookup**
-/// (`user.plan`, `tags.0`, `tags.length`).
+/// anywhere. Fields are resolved **flat-key-first, then by dot-notation nested
+/// lookup**: a literal `"url.pathname"` key wins over `{ url: { pathname } }`;
+/// the nested form (`user.plan`, `tags.0`, `tags.length`) is the fallback.
 ///
 /// Operators: `eq`, `neq`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, `contains`,
 /// `startsWith`, `endsWith`, `regex`, `exists`, `notExists`. An unknown
@@ -74,16 +75,29 @@ public func evaluateConditions(_ conditions: [BundleCondition], context: Traffic
     return true
 }
 
-// MARK: - Field lookup (dot-notation, nested)
+// MARK: - Field lookup (flat key first, then dot-notation nested)
 
-/// Resolves `field` against `context` using dot-notation nested lookup.
+/// Resolves `field` against `context` (spec "Field lookup").
 ///
-/// - Each segment indexes into the current value **only when that value is a
-///   non-null object**; array elements are addressed by their numeric-string
-///   index (`tags.0`), and arrays additionally support `.length`.
-/// - A segment reached on `null`, a primitive, or an out-of-range index yields
-///   `nil` (the "field is absent" signal). Never throws.
+/// 1. **Flat key.** If `context` has an entry whose key equals the full
+///    `field` string (dots included), that value is returned — a `.null`
+///    entry is still a hit (treated as absent by the operators) and no
+///    traversal runs.
+/// 2. **Nested.** Otherwise the field is split on `.` and walked:
+///    - Each segment indexes into the current value **only when that value is
+///      a non-null object**; array elements are addressed by their
+///      numeric-string index (`tags.0`), and arrays additionally support
+///      `.length`.
+///    - A segment reached on `null`, a primitive, or an out-of-range index
+///      yields `nil` (the "field is absent" signal).
+///
+/// Precedence: `["a.b": 1, "a": ["b": 2]]` resolves `a.b` to `1`. Never throws.
+/// Also used by the engine's `filterContext` so a dotted `allowedFields` entry
+/// captures the same value a condition would see.
 func resolveField(_ field: String, in context: TrafficalContext) -> TrafficalContextValue? {
+    if let direct = context[field] {
+        return direct
+    }
     let segments = field.components(separatedBy: ".")
     guard let first = segments.first else { return nil }
     var current = context[first]
