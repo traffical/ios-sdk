@@ -1,8 +1,3 @@
-## Unreleased
-
-- `DefaultDeviceInfoProvider` additionally emits the canonical `$`-prefixed system attributes shared by every Traffical SDK: `$os` (`ios` / `macos`; `other` on watchOS since the attribute is an enum), `$os_version` (`major.minor.patch` from `operatingSystemVersion`), `$app_version`, `$locale`, `$timezone`, `$device_model`, and `$device_type` (`UIDevice.userInterfaceIdiom`: phone → `mobile`, pad → `tablet`, else `desktop`; `desktop` where UIKit is unavailable). The existing un-prefixed keys (`appVersion`, `appBuildNumber`, `osName`, `osVersion`, `locale`, `timezone`, `deviceModel`, `screenWidth`, `screenHeight`) are unchanged; the `$` keys are the canonical ones for new conditions and are registered as system attributes in the dashboard.
-
-
 ## 0.6.1 — 2026-07-27
 
 - Resolve contextual-model coefficients by allocation `key`, not display `name` (spec 0.8.0, S10). `contextualModel.coefficients` is keyed by the stable allocation `key`, but scoring looked it up by `name`; where the two differ ("Treatment A" vs "treatment-a") the lookup missed, the arm scored `defaultAllocationScore`, and the trained model silently degraded toward a uniform softmax. Resolution is now `key ?? name`, so bundles produced before `key` existed are unaffected. Advances the sdk-spec submodule to v0.8.0 and enforces its `contextual_key_differs` conformance vector.
