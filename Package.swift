@@ -39,6 +39,15 @@ let package = Package(
             dependencies: ["Traffical"],
             path: "Tests/TrafficalTests"
         ),
+        // Host-safety suite (spec S11). Public API only — no @testable — so it
+        // builds and runs with `swift test -c release`, the configuration that
+        // ships: optimizer on, assertions stripped, overflow trapping exactly
+        // as on device. A crash anywhere fails the run.
+        .testTarget(
+            name: "TrafficalHardeningTests",
+            dependencies: ["Traffical", "TrafficalCore"],
+            path: "Tests/TrafficalHardeningTests"
+        ),
     ],
     swiftLanguageVersions: [.v5]
 )

@@ -42,19 +42,24 @@ public enum AssignmentHash {
     public static func hash64BE(_ digest: [UInt8]) -> UInt64 {
         var value: UInt64 = 0
         for i in 0..<8 {
-            value = (value << 8) | UInt64(digest[i])
+            value = (value << 8) | UInt64(truncatingIfNeeded: digest[i])
         }
         return value
     }
 
     /// Reduces the first 64 bits of a digest (unsigned big-endian) modulo
-    /// `modulus` using overflow-safe base-256 byte folding.
+    /// `modulus`.
+    ///
+    /// Total for every input (spec S11): unsigned 64-bit remainder cannot
+    /// overflow, and a non-positive modulus — which a validated bundle never
+    /// carries — yields bucket 0 instead of a division-by-zero trap. The
+    /// result is identical to the previous base-256 byte fold for every
+    /// modulus that fold could compute without overflowing.
     public static func bucket(_ digest: [UInt8], modulus: Int) -> Int {
-        var acc = 0
-        for i in 0..<8 {
-            acc = (acc * 256 + Int(digest[i])) % modulus
-        }
-        return acc
+        guard modulus > 0 else { return 0 }
+        let remainder = hash64BE(digest) % UInt64(truncatingIfNeeded: modulus)
+        // remainder < modulus <= Int.max, so the narrowing is exact.
+        return Int(truncatingIfNeeded: remainder)
     }
 
     /// Uniform value in [0, 1) derived from the first 64 bits of a digest via

@@ -74,7 +74,10 @@ public enum TrafficalBundleDecoder {
     }
 
     static func decodePolicy(_ dict: [String: Any]) throws -> BundlePolicy {
-        let state = BundlePolicyState(rawValue: try string(dict, "state")) ?? .running
+        // An unknown state is NOT running (fail-safe, and parity with the JS
+        // resolver's `state !== "running"` skip). It is recorded as `paused`,
+        // which every resolver treats as inactive.
+        let state = BundlePolicyState(rawValue: try string(dict, "state")) ?? .paused
         let kind = BundlePolicyKind(rawValue: (dict["kind"] as? String) ?? "static") ?? .static
         return BundlePolicy(
             id: try string(dict, "id"),
@@ -280,17 +283,28 @@ public enum TrafficalBundleDecoder {
 // `public` so wire-level decoders in the `Traffical` target (DecisionClient,
 // ServerResponseCache) can share the same conversion logic without duplication.
 
+/// Reads an integer only when it is exactly representable (spec S11).
+///
+/// `NSNumber.intValue` truncates fractions (1000.7 -> 1000) and saturates or
+/// wraps out-of-range values (1e20 -> Int.max, 2^64 -> 0), silently turning a
+/// malformed number into a different, plausible one. Swift's `as? Int`
+/// bridging succeeds only for exact values, and `Int(String)` is failable.
 public func numericInt(_ value: Any?) -> Int? {
     if let n = value as? Int { return n }
-    if let n = value as? NSNumber { return n.intValue }
+    // Failable String parse; cannot trap.
+    // swiftlint:disable:next unchecked_int_conversion
     if let s = value as? String { return Int(s) }
     return nil
 }
 
+/// Reads a finite double (spec S11). Non-finite values — a JSON literal such
+/// as `-1e400` decodes to -Infinity, and the strings `"NaN"` / `"Infinity"`
+/// parse — are treated as absent so they can never reach arithmetic or a
+/// serializer.
 public func numericDouble(_ value: Any?) -> Double? {
-    if let n = value as? Double { return n }
-    if let n = value as? NSNumber { return n.doubleValue }
-    if let s = value as? String { return Double(s) }
+    if let n = value as? Double { return TrafficalNumeric.finite(n) }
+    if let n = value as? NSNumber { return TrafficalNumeric.finite(n.doubleValue) }
+    if let s = value as? String { return TrafficalNumeric.finite(Double(s)) }
     return nil
 }
 

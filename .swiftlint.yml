@@ -15,14 +15,15 @@ disabled_rules:
   # iteration, etc. Reinstating the default 3-char minimum would just force
   # noise like `key`/`value` everywhere with no real readability gain.
   - identifier_name
-  # Force-try in test helpers (hardcoded fixtures) is acceptable.
-  - force_try
   # URLProtocol subclasses must use `override class func` to match the
   # parent signature, so `static_over_final_class` would force unsound
   # rewrites in test support code.
   - static_over_final_class
 
 opt_in_rules:
+  # Host safety (spec S11): a force unwrap is a latent crash in someone
+  # else's app. `force_try` and `force_cast` stay on (defaults).
+  - force_unwrapping
   - empty_count
   - explicit_init
   - first_where
@@ -44,3 +45,27 @@ excluded:
   - .build
   - sdk-spec
   - Examples
+
+force_unwrapping:
+  severity: error
+
+custom_rules:
+  # Foundation raises an uncatchable ObjC exception for NaN/Infinity or
+  # non-JSON types. Every write goes through TrafficalJSONWriter, which
+  # sanitizes first (spec S11).
+  raw_json_write:
+    name: "Raw JSONSerialization write"
+    regex: 'JSONSerialization\.data\(\s*withJSONObject'
+    excluded_match_kinds: [comment, doccomment, string]
+    message: "Use TrafficalJSONWriter.data(_:) — JSONSerialization raises on NaN/Infinity."
+    severity: error
+  # Int(Double) traps on NaN/Infinity/out-of-range; fixed-width conversions
+  # trap on overflow. Use exactly:/clamping:/truncatingIfNeeded:, the
+  # TrafficalNumeric helpers, or annotate a provably-safe site with
+  # `// swiftlint:disable:next unchecked_int_conversion` and a reason.
+  unchecked_int_conversion:
+    name: "Unchecked integer conversion"
+    regex: '\b(Int|Int8|Int16|Int32|Int64|UInt|UInt8|UInt16|UInt32|UInt64)\((?!\s*(exactly|clamping|truncatingIfNeeded|bitPattern):)'
+    excluded_match_kinds: [comment, doccomment, string]
+    message: "Integer conversion can trap. Use exactly:/clamping:/truncatingIfNeeded: or TrafficalNumeric (spec S11)."
+    severity: error

@@ -31,6 +31,8 @@ public func canonicalNumberString(_ value: Double) -> String {
     var expE = 0
     if let eIdx = swift.firstIndex(where: { $0 == "e" || $0 == "E" }) {
         mantissa = String(swift[swift.startIndex..<eIdx])
+        // Failable String parse; cannot trap.
+        // swiftlint:disable:next unchecked_int_conversion
         expE = Int(swift[swift.index(after: eIdx)...]) ?? 0
     }
 
@@ -70,5 +72,5 @@ public func canonicalNumberString(_ value: Double) -> String {
     let e = n - 1
     let expStr = (e >= 0 ? "+" : "-") + String(abs(e))
     if k == 1 { return digits + "e" + expStr }
-    return String(digits.first!) + "." + String(digits.dropFirst()) + "e" + expStr
+    return String(digits.prefix(1)) + "." + String(digits.dropFirst()) + "e" + expStr
 }

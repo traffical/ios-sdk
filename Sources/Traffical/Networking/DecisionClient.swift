@@ -90,7 +90,7 @@ public final class DecisionClient: @unchecked Sendable {
             "env": env,
             "context": contextToAny(context),
         ]
-        let data = try JSONSerialization.data(withJSONObject: body)
+        let data = try TrafficalJSONWriter.data(body)
         let response = try await http.post(path: "v1/resolve", body: data, timeoutMs: resolveTimeoutMs)
         guard (200..<300).contains(response.statusCode) else {
             throw TrafficalHTTPClient.Failure.invalidResponse
@@ -105,7 +105,7 @@ public final class DecisionClient: @unchecked Sendable {
             "env": env,
             "requests": requests.map(serializeEdgeRequest),
         ]
-        let data = try JSONSerialization.data(withJSONObject: body)
+        let data = try TrafficalJSONWriter.data(body)
         let response = try await http.post(path: "v1/decide/entity/batch", body: data)
         guard (200..<300).contains(response.statusCode) else {
             throw TrafficalHTTPClient.Failure.invalidResponse

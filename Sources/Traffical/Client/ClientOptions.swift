@@ -32,6 +32,16 @@ public struct TrafficalClientOptions: Sendable {
     public var deviceInfoProvider: DeviceInfoProvider?
     public var assignmentLogger: TrafficalAssignmentLogger?
     public var debugLogger: TrafficalDebugLogger?
+    /// Called for every error the SDK contains — rejected bundles, failed
+    /// resolutions, transport and persistence failures — deduplicated per
+    /// `tag:message`. Reporting never changes a decision. When `nil`, the first
+    /// occurrence of each distinct error is written with `NSLog`. See also
+    /// `TrafficalClient.getDiagnostics()`.
+    public var onError: TrafficalErrorHandler?
+
+    /// Production endpoint. Built without a force unwrap; the literal is a
+    /// valid URL, so the fallback is never taken.
+    public static let defaultBaseURL: URL = URL(string: "https://sdk.traffical.io") ?? URL(fileURLWithPath: "/")
 
     public enum EvaluationMode: String, Sendable {
         case bundle
@@ -48,7 +58,7 @@ public struct TrafficalClientOptions: Sendable {
         projectId: String,
         env: String,
         apiKey: String,
-        baseURL: URL = URL(string: "https://sdk.traffical.io")!,
+        baseURL: URL = TrafficalClientOptions.defaultBaseURL,
         localConfig: TrafficalConfigBundle? = nil,
         evaluationMode: EvaluationMode = .bundle,
         refreshIntervalMs: Int = 60_000,
@@ -65,7 +75,8 @@ public struct TrafficalClientOptions: Sendable {
         resolveTimeoutMs: Int = 5_000,
         deviceInfoProvider: DeviceInfoProvider? = nil,
         assignmentLogger: TrafficalAssignmentLogger? = nil,
-        debugLogger: TrafficalDebugLogger? = nil
+        debugLogger: TrafficalDebugLogger? = nil,
+        onError: TrafficalErrorHandler? = nil
     ) {
         self.orgId = orgId
         self.projectId = projectId
@@ -89,5 +100,6 @@ public struct TrafficalClientOptions: Sendable {
         self.deviceInfoProvider = deviceInfoProvider
         self.assignmentLogger = assignmentLogger
         self.debugLogger = debugLogger
+        self.onError = onError
     }
 }

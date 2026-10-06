@@ -31,6 +31,9 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
         self.dedup = deduplicate ? ExposureDeduplicator() : nil
     }
 
+    /// Thread-dictionary key marking an emission in progress on this thread.
+    private static let reentrancyKey = "io.traffical.sdk.assignment-logger.emitting"
+
     public func emit(
         decision: TrafficalDecisionResult,
         type: TrafficalAssignmentType,
@@ -38,6 +41,14 @@ public final class AssignmentLogEmitter: @unchecked Sendable {
     ) {
         let unitKey = decision.metadata.unitKeyValue
         guard !unitKey.isEmpty else { return }
+        // Re-entrancy guard: a logger that calls back into the client (e.g. to
+        // read a parameter for its own payload) gets its decision, but no
+        // nested emission. Without this, `deduplicate: false` recursed until
+        // the stack overflowed.
+        let threadDict = Thread.current.threadDictionary
+        if threadDict[Self.reentrancyKey] != nil { return }
+        threadDict[Self.reentrancyKey] = true
+        defer { threadDict.removeObject(forKey: Self.reentrancyKey) }
         for layer in decision.metadata.layers {
             guard let policyId = layer.policyId, let allocationName = layer.allocationName else { continue }
             if let dedup = dedup, !dedup.checkAndMark(unitKey: unitKey, policyId: policyId, allocationName: "\(allocationName):\(type.rawValue)") {

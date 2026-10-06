@@ -31,10 +31,10 @@ public func resolvePerEntityPolicy(
     let allocationCount: Int
 
     if let dynamic = entityConfig.dynamicAllocations {
-        guard let countValue = context[dynamic.countKey]?.numberProjection, countValue > 0 else {
+        guard let count = dynamicAllocationCount(context: context, countKey: dynamic.countKey) else {
             return nil
         }
-        allocationCount = Int(countValue.rounded(.down))
+        allocationCount = count
         allocations = (0..<allocationCount).map { i in
             BundleAllocation(
                 id: "\(policy.id)_dynamic_\(i)",
@@ -63,6 +63,22 @@ public func resolvePerEntityPolicy(
     let index = weightedSelection(weights: weights, seed: seed)
     guard index >= 0 && index < allocations.count, index < weights.count else { return nil }
     return (allocations[index], entityId, weights[index])
+}
+
+/// Reads a per-entity dynamic allocation count from the context (spec S11).
+///
+/// Only a number-typed value counts (strict typing, as in the JS resolver — a
+/// numeric string does not). It must be finite and, floored, fall within
+/// `1...TrafficalNumeric.maxDynamicAllocations`; otherwise the policy is
+/// skipped. One allocation is materialised per index, so the cap bounds the
+/// memory a single context value can make the SDK allocate.
+public func dynamicAllocationCount(context: TrafficalContext, countKey: String) -> Int? {
+    guard let raw = context[countKey]?.numberValue,
+          let count = TrafficalNumeric.int(raw.rounded(.down)),
+          count >= 1, count <= TrafficalNumeric.maxDynamicAllocations else {
+        return nil
+    }
+    return count
 }
 
 /// Joins context values for the entity keys with `_`. Returns `nil` when any

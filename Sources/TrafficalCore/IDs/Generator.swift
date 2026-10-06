@@ -19,7 +19,7 @@ public enum TrafficalIDGenerator {
         var out = ""
         out.reserveCapacity(16)
         for _ in 0..<16 {
-            let idx = Int(rng.next() % UInt64(alphabet.count))
+            let idx = Int(truncatingIfNeeded: rng.next() % UInt64(truncatingIfNeeded: alphabet.count))
             out.append(alphabet[idx])
         }
         return "\(prefix)_\(out)"

@@ -94,6 +94,11 @@ private func layerToAny(_ layer: TrafficalLayerResolution) -> [String: Any] {
 
 /// In-memory event queue with size + interval + lifecycle-triggered flushes,
 /// plus on-disk persistence of failed batches for retry on next launch.
+///
+/// Everything is bounded (spec S11 / event delivery): the in-memory queue and
+/// the persisted backlog share `maxQueueSize` (oldest dropped first), delivery
+/// is chunked, a flush is single-flight, and a payload the endpoint rejects
+/// permanently is dropped instead of being retried forever.
 public final class EventLogger: @unchecked Sendable {
     public struct Configuration: Sendable {
         public var batchSize: Int
@@ -110,15 +115,38 @@ public final class EventLogger: @unchecked Sendable {
         }
     }
 
+    /// Hooks the client uses to count and report contained failures.
+    public struct Reporter: Sendable {
+        public var onError: @Sendable (String, Error) -> Void
+        public var onDrop: @Sendable (Int) -> Void
+
+        public init(
+            onError: @escaping @Sendable (String, Error) -> Void,
+            onDrop: @escaping @Sendable (Int) -> Void
+        ) {
+            self.onError = onError
+            self.onDrop = onDrop
+        }
+    }
+
+    /// A persisted backlog larger than this is discarded unread: it can only
+    /// come from an older SDK build or corruption, and reading it would cost
+    /// more memory than the events are worth.
+    static let maxBacklogFileBytes = 5 * 1024 * 1024
+
     private let http: TrafficalHTTPClient
     private let configuration: Configuration
     private let failedBatchURL: URL
     private let lifecycleProvider: LifecycleProvider
+    private let reporter: Reporter?
 
     private var queue: [TrafficalQueuedEvent] = []
     private let queueLock = NSLock()
     private var timer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "io.traffical.event-logger")
+    /// The flush currently in flight. Concurrent callers join it instead of
+    /// racing it for the backlog file.
+    private var inFlightFlush: Task<Void, Error>?
 
     /// Auth kill-switch (spec: on HTTP 401 the SDK permanently disables event
     /// delivery for the process lifetime rather than spinning on a credential
@@ -137,11 +165,13 @@ public final class EventLogger: @unchecked Sendable {
         lifecycleProvider: LifecycleProvider,
         configuration: Configuration = Configuration(),
         directory: URL? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        reporter: Reporter? = nil
     ) {
         self.http = http
         self.configuration = configuration
         self.lifecycleProvider = lifecycleProvider
+        self.reporter = reporter
         let base = directory ?? BundleCache.defaultDirectory(fileManager: fileManager)
         try? fileManager.createDirectory(at: base, withIntermediateDirectories: true)
         self.failedBatchURL = base.appendingPathComponent("failed-events-\(projectId)-\(env).json")
@@ -161,18 +191,26 @@ public final class EventLogger: @unchecked Sendable {
 
     deinit { timer?.cancel() }
 
+    private var maxQueueSize: Int { Swift.max(1, configuration.maxQueueSize) }
+    /// Upper bound on events per delivery request, independent of
+    /// `batchSize` (which only decides when an automatic flush triggers).
+    static let maxEventsPerRequest = 100
+
     public func log(_ event: TrafficalQueuedEvent) {
-        queueLock.lock()
-        // Auth kill-switch: once permanently disabled we neither buffer nor
-        // deliver — dropping is intentional.
-        if permanentlyDisabled { queueLock.unlock(); return }
-        queue.append(event)
-        if queue.count > configuration.maxQueueSize {
-            // Drop oldest events to bound memory.
-            queue.removeFirst(queue.count - configuration.maxQueueSize)
+        var dropped = 0
+        let shouldFlush: Bool = queueLock.locked {
+            // Auth kill-switch: once permanently disabled we neither buffer nor
+            // deliver — dropping is intentional.
+            if permanentlyDisabled { return false }
+            queue.append(event)
+            if queue.count > maxQueueSize {
+                // Drop oldest events to bound memory.
+                dropped = queue.count - maxQueueSize
+                queue.removeFirst(dropped)
+            }
+            return queue.count >= configuration.batchSize
         }
-        let shouldFlush = queue.count >= configuration.batchSize
-        queueLock.unlock()
+        if dropped > 0 { reporter?.onDrop(dropped) }
         if shouldFlush { Task { await self.flushIfDue() } }
     }
 
@@ -181,51 +219,100 @@ public final class EventLogger: @unchecked Sendable {
     /// hammered. Explicit `flush()` calls (lifecycle, `close()`, tests) bypass
     /// the backoff gate — they represent user intent.
     func flushIfDue() async {
-        queueLock.lock()
-        let disabled = permanentlyDisabled
-        let due = nextRetryAt.map { $0 <= Date() } ?? true
-        queueLock.unlock()
-        guard !disabled, due else { return }
+        let due: Bool = queueLock.locked {
+            !permanentlyDisabled && (nextRetryAt.map { $0 <= Date() } ?? true)
+        }
+        guard due else { return }
         try? await flush()
     }
 
     /// Posts everything in the queue + any disk-resident failed batches.
+    ///
+    /// Single-flight: a call made while a flush is in flight joins it, then
+    /// flushes once more if events were queued after the joined flush drained
+    /// the queue — so `close()` still delivers everything logged before it.
     public func flush() async throws {
-        queueLock.lock()
-        if permanentlyDisabled { queueLock.unlock(); return }
-        queueLock.unlock()
+        while true {
+            let (task, owner) = acquireFlush()
+            try await task.value
+            if owner { return }
+            let empty: Bool = queueLock.locked { queue.isEmpty }
+            if empty { return }
+        }
+    }
+
+    private func acquireFlush() -> (Task<Void, Error>, Bool) {
+        queueLock.locked {
+            if let existing = inFlightFlush { return (existing, false) }
+            let task = Task<Void, Error> { [weak self] in
+                guard let self = self else { return }
+                defer { self.queueLock.locked { self.inFlightFlush = nil } }
+                try await self.performFlush()
+            }
+            inFlightFlush = task
+            return (task, true)
+        }
+    }
+
+    private func performFlush() async throws {
+        if queueLock.locked({ permanentlyDisabled }) { return }
 
         let pending = drainQueue().map(\.payload)
-        let failed = loadFailedPayloads()
-        let combined = failed + pending
+        let combined = bounded(loadFailedPayloads() + pending)
         if combined.isEmpty { return }
 
-        do {
-            try await postPayloads(combined)
-            clearFailedBatches()
-            queueLock.lock(); consecutiveFailures = 0; nextRetryAt = nil; queueLock.unlock()
-        } catch is AuthFailure {
-            // HTTP 401 — permanently disable delivery and discard buffered
-            // events (they will never be accepted with this credential).
-            queueLock.lock()
-            permanentlyDisabled = true
-            queue.removeAll()
-            queueLock.unlock()
-            clearFailedBatches()
-        } catch {
-            // Transient failure: persist for retry and advance backoff.
-            persistPayloads(combined)
-            queueLock.lock()
-            consecutiveFailures += 1
-            let backoff = Swift.min(maxBackoffMs, 1_000 * (1 << Swift.min(consecutiveFailures, 6)))
-            nextRetryAt = Date().addingTimeInterval(TimeInterval(backoff) / 1000.0)
-            queueLock.unlock()
-            throw error
+        var index = 0
+        while index < combined.count {
+            let end = Swift.min(index + Self.maxEventsPerRequest, combined.count)
+            let chunk = Array(combined[index..<end])
+            do {
+                try await postPayloads(chunk)
+                index = end
+            } catch is AuthFailure {
+                // HTTP 401 — permanently disable delivery and discard buffered
+                // events (they will never be accepted with this credential).
+                queueLock.locked {
+                    permanentlyDisabled = true
+                    queue.removeAll()
+                }
+                clearFailedBatches()
+                reporter?.onError("events.flush", TrafficalSDKError("event delivery disabled: HTTP 401"))
+                return
+            } catch let rejection as PermanentRejection {
+                // The endpoint will never accept this payload (e.g. 400/413):
+                // drop it rather than resending a poison batch forever.
+                reporter?.onDrop(chunk.count)
+                reporter?.onError("events.flush", rejection)
+                index = end
+            } catch {
+                // Transient failure: persist what is left for retry and advance
+                // the backoff.
+                persistPayloads(Array(combined[index...]))
+                queueLock.locked {
+                    consecutiveFailures += 1
+                    let backoff = Swift.min(maxBackoffMs, 1_000 * (1 << Swift.min(consecutiveFailures, 6)))
+                    nextRetryAt = Date().addingTimeInterval(TimeInterval(backoff) / 1000.0)
+                }
+                reporter?.onError("events.flush", error)
+                throw error
+            }
+        }
+
+        clearFailedBatches()
+        queueLock.locked {
+            consecutiveFailures = 0
+            nextRetryAt = nil
         }
     }
 
     /// Thrown by `postPayloads` on an HTTP 401 to trip the auth kill-switch.
     private struct AuthFailure: Error {}
+
+    /// Thrown for a response the endpoint will never accept on retry.
+    private struct PermanentRejection: Error, CustomStringConvertible {
+        let statusCode: Int
+        var description: String { "event batch rejected with HTTP \(statusCode); dropped" }
+    }
 
     // MARK: - Internal
 
@@ -243,43 +330,73 @@ public final class EventLogger: @unchecked Sendable {
     }
 
     private func drainQueue() -> [TrafficalQueuedEvent] {
-        queueLock.lock(); defer { queueLock.unlock() }
-        let snapshot = queue
-        queue = []
-        return snapshot
+        queueLock.locked {
+            let snapshot = queue
+            queue = []
+            return snapshot
+        }
+    }
+
+    /// Keeps the newest `maxQueueSize` payloads, counting the rest as dropped.
+    private func bounded(_ payloads: [[String: Any]]) -> [[String: Any]] {
+        guard payloads.count > maxQueueSize else { return payloads }
+        let overflow = payloads.count - maxQueueSize
+        reporter?.onDrop(overflow)
+        return Array(payloads.suffix(maxQueueSize))
     }
 
     private func postPayloads(_ payloads: [[String: Any]]) async throws {
         let body: [String: Any] = ["events": payloads]
-        let data = try JSONSerialization.data(withJSONObject: body, options: [])
-        let response = try await http.post(path: "v1/events/batch", body: data, timeoutMs: configuration.timeoutMs)
-        if response.statusCode == 401 { throw AuthFailure() }
-        guard (200..<300).contains(response.statusCode) else {
-            throw TrafficalHTTPClient.Failure.invalidResponse
+        let data: Data
+        do {
+            data = try TrafficalJSONWriter.data(body)
+        } catch {
+            // Unserializable even after sanitizing: retrying cannot help.
+            throw PermanentRejection(statusCode: 0)
         }
+        let response = try await http.post(path: "v1/events/batch", body: data, timeoutMs: configuration.timeoutMs)
+        let status = response.statusCode
+        if (200..<300).contains(status) { return }
+        if status == 401 { throw AuthFailure() }
+        // 408 Request Timeout and 429 Too Many Requests are worth retrying, as
+        // is any 5xx. Every other 4xx is a permanent rejection of the payload.
+        if (400..<500).contains(status), status != 408, status != 429 {
+            throw PermanentRejection(statusCode: status)
+        }
+        throw TrafficalHTTPClient.Failure.invalidResponse
     }
 
     /// Test/introspection hook: whether the auth kill-switch has tripped.
     public var isPermanentlyDisabled: Bool {
-        queueLock.lock(); defer { queueLock.unlock() }
-        return permanentlyDisabled
+        queueLock.locked { permanentlyDisabled }
     }
 
     private func persistPayloads(_ payloads: [[String: Any]]) {
-        // We persist the unioned list — `payloads` already includes the
-        // previously-failed ones (built by `flush`).
-        let data = (try? JSONSerialization.data(withJSONObject: payloads, options: [])) ?? Data("[]".utf8)
-        try? data.write(to: failedBatchURL, options: .atomic)
+        // `payloads` already includes the previously-failed ones (built by
+        // `performFlush`), so the file is replaced, not appended to.
+        do {
+            let data = try TrafficalJSONWriter.data(bounded(payloads))
+            try data.write(to: failedBatchURL, options: .atomic)
+        } catch {
+            reporter?.onError("events.persist", error)
+        }
     }
 
     private func persistQueueOnDisk() {
         let pending = drainQueue().map(\.payload)
         if pending.isEmpty { return }
-        let combined = loadFailedPayloads() + pending
-        persistPayloads(combined)
+        persistPayloads(loadFailedPayloads() + pending)
     }
 
     private func loadFailedPayloads() -> [[String: Any]] {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: failedBatchURL.path) else { return [] }
+        if let size = (try? fileManager.attributesOfItem(atPath: failedBatchURL.path))?[.size] as? Int,
+           size > Self.maxBacklogFileBytes {
+            clearFailedBatches()
+            reporter?.onError("events.backlog", TrafficalSDKError("persisted event backlog of \(size) bytes discarded"))
+            return []
+        }
         guard let data = try? Data(contentsOf: failedBatchURL),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return []

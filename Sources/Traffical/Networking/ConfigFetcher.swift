@@ -63,7 +63,11 @@ public final class ConfigFetcher: @unchecked Sendable {
             }
         }
 
-        let suggested = headerValue(response.headers, "X-Suggested-Refresh-Ms").flatMap { Int($0) }
+        // Parsed as a number and clamped to [1 s, 24 h]; a non-numeric,
+        // non-finite or non-positive header is ignored (S11).
+        let suggested = headerValue(response.headers, "X-Suggested-Refresh-Ms")
+            .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            .flatMap(TrafficalNumeric.refreshHintMs)
 
         if response.statusCode == 304 {
             return Result(bundle: nil, etag: etag, notModified: true, suggestedRefreshMs: suggested)

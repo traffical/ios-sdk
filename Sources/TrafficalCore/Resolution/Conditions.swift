@@ -109,7 +109,7 @@ func resolveField(_ field: String, in context: TrafficalContext) -> TrafficalCon
         case .array(let arr):
             if seg == "length" {
                 current = .number(Double(arr.count))
-            } else if let idx = Int(seg), idx >= 0, idx < arr.count {
+            } else if let idx = arrayIndex(seg), idx < arr.count {
                 current = arr[idx]
             } else {
                 return nil
@@ -140,4 +140,12 @@ private func matchesRegex(haystack: String, pattern: String) -> Bool {
     guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
     let range = NSRange(haystack.startIndex..., in: haystack)
     return regex.firstMatch(in: haystack, options: [], range: range) != nil
+}
+
+/// Parses a dot-path segment as a non-negative array index. A failable
+/// `String` parse — it cannot trap.
+private func arrayIndex(_ segment: String) -> Int? {
+    // swiftlint:disable:next unchecked_int_conversion
+    guard let index = Int(segment), index >= 0 else { return nil }
+    return index
 }

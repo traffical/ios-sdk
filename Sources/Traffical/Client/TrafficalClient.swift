@@ -21,6 +21,7 @@ public final class TrafficalClient: @unchecked Sendable {
     private let lifecycleProvider: LifecycleProvider
     private let eventLogger: EventLogger
     private let errorBoundary: ErrorBoundary
+    private let errorPolicy: ErrorPolicy
     /// Session exposure dedup. `internal` (not `private`) only so conformance
     /// tests can pre-seed the `alreadyExposed` state from the shared vectors.
     let exposureDedup: ExposureDeduplicator
@@ -45,9 +46,27 @@ public final class TrafficalClient: @unchecked Sendable {
     private var overrides: [String: TrafficalParameterValue] = [:]
     private var refreshTask: Task<Void, Never>?
     private var lastSuccessfulRefresh: Date?
-    /// Server-suggested refresh cadence (ms); honored over the default when set.
+    /// Server-suggested refresh cadence (ms), already clamped (S11); honored
+    /// over the default when set.
     private var suggestedRefreshMs: Int?
-    private(set) public var isInitialized: Bool = false
+    private var initialized = false
+    /// Where `currentBundle` came from. The stored ETag is only valid for a
+    /// bundle that came from the network or its disk cache — never for
+    /// `localConfig`, or a 304 would pin the build-time bundle forever.
+    private var bundleSource: BundleSource = .none
+
+    private enum BundleSource {
+        case none
+        case localConfig
+        case diskCache
+        case network
+    }
+
+    /// `true` once `initialize()` has completed its first attempt — whether or
+    /// not the network fetch succeeded (the SDK fails open and keeps polling).
+    public var isInitialized: Bool {
+        stateLock.locked { initialized }
+    }
 
     // MARK: - Debug accessors
     //
@@ -99,7 +118,11 @@ public final class TrafficalClient: @unchecked Sendable {
         self.defaultsStore = DefaultsStore()
         self.stableIDProvider = StableIDProvider(keychain: keychain ?? KeychainStore())
         self.lifecycleProvider = lifecycleProvider ?? UIKitLifecycleProvider()
-        self.errorBoundary = ErrorBoundary()
+        let errorPolicy = ErrorPolicy(handler: options.onError)
+        self.errorPolicy = errorPolicy
+        self.errorBoundary = ErrorBoundary(handler: { method, error in
+            errorPolicy.report(method, error, kind: .resolution)
+        })
         self.exposureDedup = ExposureDeduplicator(
             ttl: TimeInterval(options.exposureSessionTtlMs) / 1000.0
         )
@@ -113,7 +136,11 @@ public final class TrafficalClient: @unchecked Sendable {
                 flushIntervalMs: options.flushIntervalMs,
                 timeoutMs: options.eventsTimeoutMs
             ),
-            directory: directory
+            directory: directory,
+            reporter: EventLogger.Reporter(
+                onError: { tag, error in errorPolicy.report(tag, error, kind: .sideEffect) },
+                onDrop: { count in errorPolicy.recordDroppedEvents(count) }
+            )
         )
         if let logger = options.assignmentLogger {
             self.assignmentEmitter = AssignmentLogEmitter(
@@ -127,18 +154,35 @@ public final class TrafficalClient: @unchecked Sendable {
             self.assignmentEmitter = nil
         }
 
-        // Seed from local (compiled-in) and disk-cached bundles before any
-        // network call so the first synchronous `getParams` / typed getter
-        // already has something to work with.
-        if let local = options.localConfig {
-            self.currentBundle = local
-        } else if let cached = bundleCache.readBundle() {
-            self.currentBundle = cached
+        // Seed before any network call so the first synchronous `getParams` /
+        // typed getter already has something to work with. Order per spec S8:
+        // last-good disk cache, then `localConfig`, then caller defaults. Every
+        // candidate is validated (S11): a cache file that fails is deleted so
+        // it cannot crash-loop or reject-loop on every launch.
+        if let raw = bundleCache.read() {
+            do {
+                let cached = try TrafficalBundleDecoder.decode(raw)
+                if let failure = TrafficalBundleValidator.validate(cached) { throw failure }
+                self.currentBundle = cached
+                self.bundleSource = .diskCache
+            } catch {
+                bundleCache.clear()
+                errorPolicy.report("bundleCache", error, kind: .rejectedBundle)
+            }
+        }
+        if currentBundle == nil, let local = options.localConfig {
+            if let failure = TrafficalBundleValidator.validate(local) {
+                errorPolicy.report("localConfig", failure, kind: .rejectedBundle)
+            } else {
+                self.currentBundle = local
+                self.bundleSource = .localConfig
+            }
         }
         if let cachedServer = serverCache.read() {
             self.serverResponse = cachedServer
+            self.suggestedRefreshMs = TrafficalNumeric.refreshHintMs(cachedServer.suggestedRefreshMs)
         }
-        self.etag = defaultsStore.string(forKey: etagDefaultsKey)
+        self.etag = bundleSource == .diskCache ? defaultsStore.string(forKey: etagDefaultsKey) : nil
 
         // Foreground -> refresh in the background.
         self.lifecycleProvider.onVisibilityChange { [weak self] state in
@@ -159,18 +203,19 @@ public final class TrafficalClient: @unchecked Sendable {
     /// SDK is safe to call before this returns — it will use `localConfig`,
     /// the disk cache, or your inline defaults. `initialize` upgrades that to
     /// fresh state.
+    ///
+    /// A failed first fetch (offline cold start, HTTP error, rejected bundle)
+    /// is reported to `onError` and does not stop the SDK: background refresh
+    /// still starts, so the client converges once the network is back.
+    /// Calling it again is safe and never starts a second refresh loop.
     public func initialize() async {
-        await errorBoundary.captureAsync("initialize") { [weak self] in
-            guard let self = self else { return }
-            switch self.options.evaluationMode {
-            case .bundle: try await self.refreshBundle()
-            case .server: try await self.refreshServer()
-            }
-            self.startBackgroundRefresh()
-            self.stateLock.lock()
-            self.isInitialized = true
-            self.stateLock.unlock()
+        do {
+            try await refresh()
+        } catch {
+            errorPolicy.report("initialize", error, kind: .sideEffect)
         }
+        startBackgroundRefresh()
+        stateLock.locked { initialized = true }
     }
 
     /// Resolves once the first usable config is loaded, or the fail-open
@@ -193,9 +238,22 @@ public final class TrafficalClient: @unchecked Sendable {
     /// AWAITS a final event flush before returning (replaces the old
     /// fire-and-forget `shutdown()`).
     public func close() async {
-        refreshTask?.cancel()
-        refreshTask = nil
+        let task: Task<Void, Never>? = stateLock.locked {
+            let current = refreshTask
+            refreshTask = nil
+            return current
+        }
+        task?.cancel()
         try? await eventLogger.flush()
+    }
+
+    // MARK: - Diagnostics
+
+    /// Counters for degradation that is otherwise invisible: contained
+    /// resolution errors, rejected bundles, side-effect failures, dropped
+    /// events, and the most recent error. Monotonic; safe to poll.
+    public func getDiagnostics() -> TrafficalDiagnostics {
+        errorPolicy.diagnostics()
     }
 
     // MARK: - Identity
@@ -245,7 +303,17 @@ public final class TrafficalClient: @unchecked Sendable {
     public func int(_ key: String, default defaultValue: Int, context: TrafficalContext = [:]) -> Int {
         let value = decideAndExpose(key: key, defaults: [key: .number(Double(defaultValue))], context: context)
         guard let n = value.numberValue else { return defaultValue }
-        return Int(n)
+        // `Int(Double)` traps on NaN / ±Infinity / out-of-range (S11). A value
+        // that does not fit returns the caller's default and is reported.
+        guard let int = TrafficalNumeric.int(n) else {
+            errorPolicy.report(
+                "int(\(key))",
+                TrafficalSDKError("value is not representable as Int; returned the default"),
+                kind: .resolution
+            )
+            return defaultValue
+        }
+        return int
     }
 
     public func json(_ key: String, default defaultValue: TrafficalJSON, context: TrafficalContext = [:]) -> TrafficalJSON {
@@ -269,7 +337,8 @@ public final class TrafficalClient: @unchecked Sendable {
                 metadata: TrafficalDecisionMetadata(
                     timestamp: TrafficalTime.now(),
                     unitKeyValue: "",
-                    layers: []
+                    layers: [],
+                    reason: .error
                 )
             )
         ) {
@@ -415,30 +484,34 @@ public final class TrafficalClient: @unchecked Sendable {
         logConfig(.info, "config refresh: fetching", details: current.map { ["if-none-match": $0] } ?? [:])
         do {
             let result = try await configFetcher.fetch(etag: current)
+            let hint = TrafficalNumeric.refreshHintMs(result.suggestedRefreshMs.map(Double.init))
             if let bundle = result.bundle {
-                // S8: validate a freshly-fetched bundle before it can replace a
-                // known-good one. A bundle with a zero/negative bucketCount or an
-                // empty unit key would make every hash degenerate — discard it
-                // and keep the last-good cached bundle rather than crash or serve
+                // S8/S11: validate a freshly-fetched bundle before it can
+                // replace a known-good one, and reject it whole — discard it
+                // and keep the last-good bundle rather than crash or serve
                 // garbage. (A structurally-undecodable bundle already fails open
                 // via the ConfigFetcher decode error path.)
-                guard bundle.hashing.bucketCount >= 1, !bundle.hashing.unitKey.isEmpty else {
-                    logConfig(.error, "config bundle malformed; keeping last-good", details: [
-                        "bucketCount": String(bundle.hashing.bucketCount),
-                        "unitKey": bundle.hashing.unitKey.isEmpty ? "<empty>" : bundle.hashing.unitKey,
+                if let failure = TrafficalBundleValidator.validate(bundle) {
+                    logConfig(.error, "config bundle rejected; keeping last-good", details: [
+                        "path": failure.path,
+                        "reason": failure.reason,
                     ])
+                    errorPolicy.report("fetchConfig", failure, kind: .rejectedBundle)
                     return
                 }
                 // Persist + swap in.
-                if let raw = try? JSONSerialization.data(withJSONObject: serialize(bundle: bundle)) {
-                    bundleCache.write(raw)
+                do {
+                    bundleCache.write(try TrafficalJSONWriter.data(serialize(bundle: bundle)))
+                } catch {
+                    errorPolicy.report("bundleCache.write", error, kind: .sideEffect)
                 }
-                stateLock.lock()
-                currentBundle = bundle
-                etag = result.etag
-                lastSuccessfulRefresh = Date()
-                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
-                stateLock.unlock()
+                stateLock.locked {
+                    currentBundle = bundle
+                    bundleSource = .network
+                    etag = result.etag
+                    lastSuccessfulRefresh = Date()
+                    if let hint = hint { suggestedRefreshMs = hint }
+                }
                 defaultsStore.setString(result.etag, forKey: etagDefaultsKey)
                 logConfig(.info, "config bundle loaded", details: [
                     "version": bundle.version,
@@ -451,10 +524,10 @@ public final class TrafficalClient: @unchecked Sendable {
                 await prefetchEdgeResults(bundle: bundle)
             } else if result.notModified {
                 // ETag matched — bundle stays as-is but the refresh did succeed.
-                stateLock.lock()
-                lastSuccessfulRefresh = Date()
-                if let s = result.suggestedRefreshMs { suggestedRefreshMs = s }
-                stateLock.unlock()
+                stateLock.locked {
+                    lastSuccessfulRefresh = Date()
+                    if let hint = hint { suggestedRefreshMs = hint }
+                }
                 logConfig(.info, "config not modified (304)", details: ["etag": current ?? "—"])
             }
         } catch {
@@ -479,14 +552,17 @@ public final class TrafficalClient: @unchecked Sendable {
     @discardableResult
     private func resolveAndCache(context: TrafficalContext, key: String) async throws -> ServerResolveResponse {
         let response = try await decisionClient.resolve(context: context)
-        stateLock.lock()
-        serverResponsesByContext[key] = response
-        serverResponse = response
-        lastSuccessfulRefresh = Date()
-        if let s = response.suggestedRefreshMs { suggestedRefreshMs = Int(s) }
-        stateLock.unlock()
-        if let data = try? JSONSerialization.data(withJSONObject: serialize(serverResponse: response)) {
-            serverCache.write(data)
+        let hint = TrafficalNumeric.refreshHintMs(response.suggestedRefreshMs)
+        stateLock.locked {
+            serverResponsesByContext[key] = response
+            serverResponse = response
+            lastSuccessfulRefresh = Date()
+            if let hint = hint { suggestedRefreshMs = hint }
+        }
+        do {
+            serverCache.write(try TrafficalJSONWriter.data(serialize(serverResponse: response)))
+        } catch {
+            errorPolicy.report("serverCache.write", error, kind: .sideEffect)
         }
         logConfig(.info, "server resolve succeeded", details: [
             "decisionId": response.decisionId,
@@ -527,20 +603,38 @@ public final class TrafficalClient: @unchecked Sendable {
         options.debugLogger?(TrafficalDebugEvent(category: .config, level: level, message: message, details: details))
     }
 
+    /// Starts the refresh loop once. Idempotent: a second call while a loop is
+    /// running is a no-op.
     private func startBackgroundRefresh() {
         guard options.refreshIntervalMs > 0 else { return }
-        refreshTask = Task { [weak self] in
-            while let self = self, !Task.isCancelled {
-                // Honor a server `suggestedRefreshMs` over the default, and apply
-                // ±10% jitter so clients don't stampede the config endpoint.
-                self.stateLock.lock()
-                let base = self.suggestedRefreshMs ?? self.options.refreshIntervalMs
-                self.stateLock.unlock()
-                let jittered = Double(base) * Double.random(in: 0.9...1.1)
-                try? await Task.sleep(nanoseconds: UInt64(max(0, jittered)) * 1_000_000)
-                try? await self.refresh()
+        stateLock.locked {
+            guard refreshTask == nil else { return }
+            refreshTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let interval = self?.nextRefreshIntervalMs() else { return }
+                    // Honor a server `suggestedRefreshMs` over the default, and
+                    // apply ±10% jitter so clients don't stampede the config
+                    // endpoint. `interval` is clamped, so the nanosecond
+                    // product stays far below UInt64.max.
+                    let jitteredMs = Double(interval) * Double.random(in: 0.9...1.1)
+                    // swiftlint:disable:next unchecked_int_conversion
+                    try? await Task.sleep(nanoseconds: UInt64(jitteredMs * 1_000_000))
+                    guard !Task.isCancelled, let self = self else { return }
+                    do {
+                        try await self.refresh()
+                    } catch {
+                        self.errorPolicy.report("refresh", error, kind: .sideEffect)
+                    }
+                }
             }
         }
+    }
+
+    /// The next refresh delay: the clamped server hint, else the configured
+    /// interval floored at the S11 minimum.
+    private func nextRefreshIntervalMs() -> Int {
+        let hint = stateLock.locked { suggestedRefreshMs }
+        return hint ?? Swift.max(options.refreshIntervalMs, TrafficalNumeric.minRefreshMs)
     }
 
     // MARK: - Internal computation
@@ -631,7 +725,8 @@ public final class TrafficalClient: @unchecked Sendable {
                 metadata: TrafficalDecisionMetadata(
                     timestamp: TrafficalTime.now(),
                     unitKeyValue: "",
-                    layers: []
+                    layers: [],
+                    reason: .noBundle
                 )
             )
         }
@@ -643,6 +738,7 @@ public final class TrafficalClient: @unchecked Sendable {
         // response's stateVersion (mirrors `getConfigVersion()` in the JS SDK).
         var metadata = response.metadata
         if metadata.configVersion == nil { metadata.configVersion = response.stateVersion }
+        metadata.reason = decisionReason(hasBundle: true, layers: metadata.layers)
         return TrafficalDecisionResult(
             // Fresh decisionId per call — never reuse the resolve response's
             // decisionId across decisions (spec 0.7.0 S8).
@@ -656,14 +752,15 @@ public final class TrafficalClient: @unchecked Sendable {
     /// php-sdk's `md5(json_encode($context))` — sorted keys so equivalent
     /// contexts collapse to one edge round-trip and one cache slot.
     private func contextCacheKey(_ context: TrafficalContext) -> String {
-        let any = contextToAny(context)
-        if JSONSerialization.isValidJSONObject(any),
-           let data = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys]),
+        if let data = try? TrafficalJSONWriter.data(contextToAny(context), options: [.sortedKeys]),
            let string = String(data: data, encoding: .utf8) {
             return string
         }
         // Fall back to a stable textual form if the context isn't JSON-encodable.
-        return context.keys.sorted().map { "\($0)=\(context[$0]!.asAny)" }.joined(separator: "&")
+        return context
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value.asAny)" }
+            .joined(separator: "&")
     }
 
     /// Prefetches edge-mode per-entity results so bundle-mode `decide()` can
@@ -677,7 +774,7 @@ public final class TrafficalClient: @unchecked Sendable {
             $0.entityConfig?.resolutionMode == .edge && $0.state == .running
         }
         guard !edgePolicies.isEmpty else {
-            stateLock.lock(); cachedEdgeOptions = nil; stateLock.unlock()
+            stateLock.locked { cachedEdgeOptions = nil }
             return
         }
 
@@ -689,9 +786,11 @@ public final class TrafficalClient: @unchecked Sendable {
             guard let cfg = policy.entityConfig,
                   let entityId = buildEntityId(entityKeys: cfg.entityKeys, context: context) else { continue }
             var allocationCount: Int?
-            if let dynamic = cfg.dynamicAllocations,
-               let n = context[dynamic.countKey]?.numberProjection, n > 0 {
-                allocationCount = Int(n.rounded(.down))
+            if let dynamic = cfg.dynamicAllocations {
+                // Same bounded, strictly-typed rule as bundle-mode resolution
+                // (S11); an invalid count skips the policy.
+                guard let count = dynamicAllocationCount(context: context, countKey: dynamic.countKey) else { continue }
+                allocationCount = count
             }
             requests.append(EdgeDecideRequest(
                 policyId: policy.id,
@@ -708,7 +807,7 @@ public final class TrafficalClient: @unchecked Sendable {
         for r in responses {
             results[r.policyId] = EdgeResult(allocationIndex: r.allocationIndex, entityId: r.entityId)
         }
-        stateLock.lock(); cachedEdgeOptions = ResolveOptions(edgeResults: results); stateLock.unlock()
+        stateLock.locked { cachedEdgeOptions = ResolveOptions(edgeResults: results) }
         logConfig(.info, "edge prefetch complete", details: ["policies": String(results.count)])
     }
 

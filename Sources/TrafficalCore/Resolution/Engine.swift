@@ -61,9 +61,17 @@ public func decide(
             unitKeyValue: result.unitKeyValue,
             layers: result.layers,
             filteredContext: filteredContext,
-            configVersion: bundle?.version
+            configVersion: bundle?.version,
+            reason: decisionReason(hasBundle: bundle != nil, layers: result.layers)
         )
     )
+}
+
+/// `no-bundle` without a bundle, `resolved` when any layer matched a policy,
+/// otherwise `default` — the same rule as the JS SDK.
+public func decisionReason(hasBundle: Bool, layers: [TrafficalLayerResolution]) -> TrafficalDecisionReason {
+    guard hasBundle else { return .noBundle }
+    return layers.contains { $0.policyId != nil } ? .resolved : .default
 }
 
 /// Reads the unit key value from context using the bundle's configured key.
@@ -269,8 +277,10 @@ func resolveInternal(
                 // epsilon_greedy / ucb1): the propensity is the chosen
                 // allocation's bucket-range share. Static policies omit it.
                 if policy.kind == .adaptive, bundle.hashing.bucketCount > 0 {
-                    matchedProbability = Double(alloc.bucketRange.end - alloc.bucketRange.start + 1)
-                        / Double(bundle.hashing.bucketCount)
+                    // Width in Double: `end - start + 1` in Int overflows for
+                    // an end near Int.max (S11).
+                    let width = Double(alloc.bucketRange.end) - Double(alloc.bucketRange.start) + 1
+                    matchedProbability = width / Double(bundle.hashing.bucketCount)
                 }
                 matchedPolicies.append(policy)
                 if hasParams { applyOverrides(alloc.overrides, to: &assignments) }

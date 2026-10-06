@@ -23,6 +23,25 @@ jobs:
       - name: Test
         run: swift test --enable-code-coverage
 
+  hardening:
+    # Host-safety suite (spec S11) in the configuration that ships: optimizer
+    # on, assertions stripped, overflow trapping as on device. Any crash —
+    # trap or ObjC exception — fails the job.
+    name: Host-safety suite (release)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Hardening tests (-c release)
+        run: swift test -c release --filter TrafficalHardeningTests
+
+      - name: Extended fuzz budget
+        env:
+          TRAFFICAL_FUZZ_ITERATIONS: "800"
+        run: swift test -c release --filter TrafficalHardeningTests.MutationFuzzTests
+
   simulator-build:
     name: iOS simulator build
     runs-on: macos-14

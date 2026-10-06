@@ -1,8 +1,14 @@
 import Foundation
 
-/// Wraps SDK entry points so a panic in the engine never surfaces to the host
-/// app. Mirrors `@traffical/js-client`'s ErrorBoundary — every public method
-/// returns a safe fallback on failure and logs to the registered handler.
+/// Wraps SDK entry points so a thrown Swift error never surfaces to the host
+/// app: the method returns a safe fallback and the error goes to the handler.
+///
+/// This contains Swift `throw` only. It cannot catch a runtime trap (integer
+/// overflow, out-of-range conversion, division by zero) or an Objective-C
+/// exception — those terminate the process regardless. Host safety (spec S11)
+/// therefore comes from the SDK's code paths being total — `TrafficalNumeric`,
+/// `TrafficalJSONWriter`, bundle validation at every ingestion point — not
+/// from this boundary.
 public final class ErrorBoundary: @unchecked Sendable {
     public typealias Handler = (String, Error) -> Void
 
