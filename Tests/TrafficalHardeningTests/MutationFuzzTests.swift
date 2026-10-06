@@ -118,8 +118,9 @@ final class MutationFuzzTests: HardeningTestCase {
             .string("inf"), .bool(true), .null, .array([.number(.nan)]), .object(["a": .number(.infinity)]),
         ]
         var context: TrafficalContext = ["userId": .string("fuzz-\(rng.next() % 1_000)")]
-        for key in ["score", "price", "platform", "storeId", "slotCount", "country", "plan", "engagement_score", "device_type"] {
-            if Bool.random(using: &rng) { context[key] = values.randomElement(using: &rng) }
+        let keys = ["score", "price", "platform", "storeId", "slotCount", "country", "plan", "engagement_score", "device_type"]
+        for key in keys where Bool.random(using: &rng) {
+            context[key] = values.randomElement(using: &rng)
         }
         if Int.random(in: 0..<6, using: &rng) == 0 { context["userId"] = values.randomElement(using: &rng) }
         return context

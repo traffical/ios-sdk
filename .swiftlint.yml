@@ -54,6 +54,8 @@ custom_rules:
   # non-JSON types. Every write goes through TrafficalJSONWriter, which
   # sanitizes first (spec S11).
   raw_json_write:
+    # Shipped code only; test fixtures and doubles are exempt.
+    included: ".*/Sources/.*\\.swift"
     name: "Raw JSONSerialization write"
     regex: 'JSONSerialization\.data\(\s*withJSONObject'
     excluded_match_kinds: [comment, doccomment, string]
@@ -64,6 +66,8 @@ custom_rules:
   # TrafficalNumeric helpers, or annotate a provably-safe site with
   # `// swiftlint:disable:next unchecked_int_conversion` and a reason.
   unchecked_int_conversion:
+    # Shipped code only; test fixtures and doubles are exempt.
+    included: ".*/Sources/.*\\.swift"
     name: "Unchecked integer conversion"
     regex: '\b(Int|Int8|Int16|Int32|Int64|UInt|UInt8|UInt16|UInt32|UInt64)\((?!\s*(exactly|clamping|truncatingIfNeeded|bitPattern):)'
     excluded_match_kinds: [comment, doccomment, string]

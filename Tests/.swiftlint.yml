@@ -1,0 +1,6 @@
+# Nested config for test code. The host-safety rules (spec S11) guard code
+# that ships inside customer apps; test fixtures and doubles may force-try
+# hardcoded JSON and force-unwrap literals.
+disabled_rules:
+  - force_try
+  - force_unwrapping
